@@ -1,9 +1,9 @@
 *
-*	X68k polyphonic ADPCM driver PCM8A.X v0.56				*;version
+*	X68k polyphonic ADPCM driver PCM8A.X v0.57				*;version
 *		Xellent30ｼﾘｰｽﾞ ﾛｰｶﾙSRAM用ﾜｰｸ分離対応
-*		040turbo 対応
+*		040turbo 対応 , ﾊｲﾒﾓﾘ常駐対応
 *		ADPCM clock up 暫定対応
-*					philly	1995/12/12
+*					philly	1995/12/19
 *
 *	改造は自由ですが、利用者の混乱を防ぐために、
 *	改造内容をドキュメント等に明記しておいてください。
@@ -624,14 +624,12 @@ PCM00	.macro
 	add.l	d4,(a1)+
 	add.l	d5,(a1)+
 	.endm
-PCM00L	equ	12		* 12ﾊﾞｲﾄ
 
 PCM01	.macro
 	movem.l	(a0)+,d0-d1/d4-d5
 	movem.l	d0-d1/d4-d5,(a1)
 	lea	16(a1),a1
 	.endm			* 12ﾊﾞｲﾄ
-PCM01L	equ	12
 
 PCM10	.macro
 	move.w	(a0)+,d0
@@ -1935,7 +1933,7 @@ IOCS673:
 	bra	IOCS3X
 
 IOCS674:
-	moveq	#56,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.56)		*;version
+	moveq	#57,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.57)		*;version
 	bra	IOCS3X
 
 IOCS675:				* 単音再生ﾓｰﾄﾞ/録音時動作制御
@@ -2088,7 +2086,7 @@ CHNSRE:	movem.l	(sp)+,d1-d5/a0-a1
 
 	.dc.w	0,0,0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
 
-	.dc.b	'PCM8A056'		* PCM8A 認識用				*;version
+	.dc.b	'PCM8A057'		* PCM8A 認識用				*;version
 CHKFLG:	.dc.b	'@PCM/048'		* PCM8 認識用
 
 *--------------------------------------------------------------------
@@ -6589,12 +6587,12 @@ KEPCHK:	move.l	d1,-(sp)		* trap #2 の飛び先ﾁｪｯｸ
 	lea	T2VECA.w,a0
 	movea.l	(a0),a0
 	cmpa.l	#$00F00000,a0
-	bcc	KEPCHE
+	bcc	KEPCH1
 	moveq	#5,d1			* 5:組み込み拒否
-	subq.l	#8,a0
+KEPCH1:	subq.l	#8,a0
 	move.l	(a0)+,d0
 	cmpi.l	#PCM8OK,d0
-	beq	KEPCH1
+	beq	KEPCH2
 	cmpi.l	#PCM8NG,d0
 	bne	KEPCHE
 	cmpi.l	#'/048',(a0)
@@ -6606,7 +6604,7 @@ KEPCHK:	move.l	d1,-(sp)		* trap #2 の飛び先ﾁｪｯｸ
 	bne	KEPCHE
 	moveq	#2,d1			* 2:常駐していない(trap #2 は接続)
 	bra	KEPCHE
-KEPCH1:	cmpi.l	#'/048',(a0)
+KEPCH2:	cmpi.l	#'/048',(a0)
 	bne	KEPCHE
 	moveq	#4,d1			* 4:他の PCM8 が常駐している
 	lea	-12(a0),a0
@@ -8393,7 +8391,7 @@ DLTTB3:	.dc.w	 2,-1
 	.dc.w	16, 8
 
 TTLME1:	.dc.b	13,10
-TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.56 '			*;version
+TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.57 '			*;version
 	.dc.b	'(c)1993-95 philly',13,10,0
 USEMES:	.dc.b	'使用法：PCM8A [<ｽｲｯﾁ>]',13,10
 	.dc.b	9,'ON',9,': 多重再生ﾓｰﾄﾞ(通常)',13,10
