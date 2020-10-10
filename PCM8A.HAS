@@ -1,0 +1,7843 @@
+*
+*	X68k polyphonic ADPCM driver PCM8A.X v0.51				*;version
+*		ADPCM clock up & 040turbo 暫定対応(?)版
+*					philly	1995/4/24
+*
+*	機能追加の結果 v0.4x より重くなっています。
+*	改造は自由ですが、利用者の混乱を防ぐために、
+*	改造内容をドキュメント等に明記しておいてください。
+
+	.include	doscall.mac
+	.include	iocscall.mac
+
+PCMCI1	equ	8			* ﾁｬﾝﾈﾙ数のﾃﾞﾌｫﾙﾄ値
+PCMCI2	equ	16			*   〃   (常駐時の領域確保用)
+PCMCIX	equ	63			*   〃   最大値
+PCMBI1	equ	48			* 処理ﾊﾞｲﾄ数のﾃﾞﾌｫﾙﾄ値
+PCMBI2	equ	144			*     〃    (常駐時の領域確保用)
+PCMBIX	equ	144			*     〃    の指定可能最大値
+
+VOLMN1	equ	$40			* 最小音量のﾃﾞﾌｫﾙﾄ値
+VOLMN2	equ	$40			*    〃   (常駐時の領域確保用)
+VOLMX1	equ	$A0			* 最大音量のﾃﾞﾌｫﾙﾄ値
+VOLMX2	equ	$A0			*    〃   (常駐時の領域確保用)
+VOLWID	equ	48
+VOLCLP	equ	79
+VOLOFS	equ	$80
+
+PCM8FL	equ	$42			* PCM8Aが動作中の$0C32の値
+PCM8OK	equ	'PCM8'
+PCM8NG	equ	'@PCM'
+PCMSPC	equ	$80
+PCMSP2	equ	$88
+PCMSPN	equ	4
+PCMBGN	equ	4
+TRYNUM	equ	4			* 過負荷時ﾘﾄﾗｲ回数
+DCOL0	equ	$0000			* 動作表示色ｺｰﾄﾞ(割り込み終了)
+DCOL1	equ	$0020			*	〃	(DPCM→ADPCM変換中)
+DCOL2	equ	$0018			*	〃	(ADPCM→DPCM変換中)
+CACHEL	equ	16			* ｷｬｯｼｭ1ﾗｲﾝのﾊﾞｲﾄ数
+CACHES	equ	4			*     〃     ｼﾌﾄ回数
+REPT	equ	5			* ｸﾛｯｸｱｯﾌﾟ自動判別の繰り返し回数-1
+
+T2VECT	equ	$0022			* trap #2 ﾍﾞｸﾀ番号
+
+T2VECA	equ	$0088
+FM1BBF	equ	$09DA
+ADIOCS	equ	$0C32
+MPUFLG	equ	$0CBC
+HUTOP	equ	$6800
+TXTPL0	equ	$E82200
+DMACH3	equ	$E840C0
+MFPIMA	equ	$E88013
+MFPIMB	equ	$E88015
+FMADR	equ	$E90001
+FMDAT	equ	$E90003
+PCMCNT	equ	$E92001
+PCMDAT	equ	$E92003
+PPIPC	equ	$E9A005
+PPICTL	equ	$E9A007
+
+*************************************************
+*  ADPCM → DPCM 変換ﾏｸﾛ			*	DPCM:ここではPCMﾃﾞｰﾀの差分情報の意味
+*						*
+* IN	D0.l	ﾃｰﾌﾞﾙｱﾄﾞﾚｽ情報			*
+*	D1.l	ﾃﾞｰﾀ位置ｵﾌｾｯﾄ(音量変換に使用)	*	音量1段階の変換で1Kﾊﾞｲﾄのﾃｰﾌﾞﾙが必要
+*	(A0)	ADPCMﾃﾞｰﾀ			*
+*	D6.l	0 (定数)			*
+*						*
+* OUT	D0.l	次のﾃｰﾌﾞﾙｱﾄﾞﾚｽ情報		*
+*	A0	+1される			*
+*	(A1)	DPCMﾃﾞｰﾀ , A1は+4される		*
+*						*
+* WORK	D4.l					*
+*	D5.l					*
+*	A2.l					*
+*************************************************
+*	1:1			15.6K <- 15.6K		1
+*				20.8K <- 20.8K		4/3
+*				31.2K <- 31.2K		2
+A2P00	.macro
+	move.b	(a0)+,d0		*	 8	 2
+	add.w	d0,d0			*	 4	 2
+	add.w	d0,d0			*	 4	 2
+	movea.l	d0,a2			*	 4	 2	音量変換しない場合に,2ｸﾛｯｸ
+	move.l	(a2,d1.l),d0		*	18	 4  ←	減らせるが,ﾃｰﾌﾞﾙが大きくなる
+	add.l	d0,(a1)+		*	20	 2  ←	誤差が出る
+	move.l	(a2),d0			*	12	 2
+	.endm				* 合計	70ｸﾛｯｸ	16ﾊﾞｲﾄ
+A2P00L	equ	16
+
+A2P01	.macro				* １回目
+	move.b	(a0)+,d0		*	 8	 2
+	add.w	d0,d0			*	 4	 2
+	add.w	d0,d0			*	 4	 2
+	movea.l	d0,a2			*	 4	 2
+	move.l	(a2,d1.l),(a1)+		*	26	 4
+	move.l	(a2),d0			*	12	 2
+	.endm				* 合計	58ｸﾛｯｸ	14ﾊﾞｲﾄ
+A2P01L	equ	14
+
+*	1:2/3			15.6K <- 10.4K		2/3
+*				31.2K <- 20.8K		4/3
+A2P10	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.l	d0,(a1)+
+	addq.l	#2,a1
+	move.l	(a2),d0
+	.endm
+
+A2P11	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	(a2),d0
+	.endm
+
+*	1:1/2			15.6K <- 7.8K		1/2
+*				20.8K <- 10.4K		2/3
+*				31.2K <- 15.6K		1
+A2P20	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,4(a1)
+	swap	d0
+	add.w	d0,(a1)
+	addq.l	#8,a1
+	move.l	(a2),d0
+	.endm
+
+A2P21	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	(a2),d0
+	.endm
+
+*	1:1/3			15.6K <- 5.2K		1/3
+*				31.2K <- 10.4K		2/3
+A2P30	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,6(a1)
+	swap	d0
+	add.w	d0,(a1)
+	lea	12(a1),a1
+	move.l	(a2),d0
+	.endm
+
+A2P31	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.l	(a2),d0
+	.endm
+
+*	1:1/4			15.6K <- 3.9K		1/4
+*				20.8K <- 5.2K		1/3
+*				31.2K <- 7.8K		1/2
+A2P40	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,8(a1)
+	swap	d0
+	add.w	d0,(a1)
+	lea	16(a1),a1
+	move.l	(a2),d0
+	.endm
+
+A2P41	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	(a2),d0
+	.endm
+
+*	1:1/6			31.2K <- 5.2K		1/3
+A2P50	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,12(a1)
+	swap	d0
+	add.w	d0,(a1)
+	lea	24(a1),a1
+	move.l	(a2),d0
+	.endm
+
+A2P51	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	(a2),d0
+	.endm
+
+*	1:1/8			31.2K <- 3.9K		1/4
+A2P60	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,16(a1)
+	swap	d0
+	add.w	d0,(a1)
+	lea	32(a1),a1
+	move.l	(a2),d0
+	.endm
+
+A2P61	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	(a2),d0
+	.endm
+
+*	1:4/3			15.6K <- 20.8K		2/3
+A2P70	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),d0
+	add.w	2(a2,d1.l),d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.l	d0,(a1)+
+	move.l	(a2),d0
+	.endm
+
+A2P71	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),d0
+	add.w	2(a2,d1.l),d0
+	move.w	d0,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),(a1)+
+	move.l	(a2),d0
+	.endm
+
+*	1:2			15.6K <- 31.2K		2
+A2P80	.macro			* 20ﾊﾞｲﾄ
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),d0
+	add.w	2(a2,d1.l),d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	.endm
+
+A2P81	.macro			* 20ﾊﾞｲﾄ
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),d0
+	add.w	2(a2,d1.l),d0
+	move.w	d0,(a1)+
+	move.l	(a2),d0
+	.endm
+
+*	1:3/4			20.8K <- 15.6K		1/3
+A2PA0	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.l	d0,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,4(a1)
+	swap	d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	addq.l	#4,a1
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.l	d0,(a1)+
+	move.l	(a2),d0
+	addq.l	#2,a1
+	.endm
+
+A2PA1	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	(a2),d0
+	.endm
+
+*	1:3/8			20.8K <- 7.8K		1/6
+A2PB0	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,6(a1)
+	swap	d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	addq.l	#8,a1
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,6(a1)
+	swap	d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	addq.l	#8,a1
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,6(a1)
+	swap	d0
+	add.w	d0,(a1)
+	move.l	(a2),d0
+	lea	12(a1),a1
+	.endm
+
+A2PB1	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.l	(a2),d0
+	.endm
+
+*	1:3/16			20.8K <- 3.9K		1/12
+A2PC0	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,10(a1)
+	swap	d0
+	add.w	d0,(a1)
+	move.l	(a2),d0
+	lea	22(a1),a1
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,10(a1)
+	swap	d0
+	add.w	d0,(a1)
+	move.l	(a2),d0
+	lea	20(a1),a1
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,10(a1)
+	swap	d0
+	add.w	d0,(a1)
+	move.l	(a2),d0
+	lea	22(a1),a1
+	.endm
+
+A2PC1	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.w	d6,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	(a2),d0
+	.endm
+
+*	1:3/2			20.8K <- 31.2K		2/3
+A2PD0	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),d0
+	add.w	2(a2,d1.l),d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d4
+	swap	d4
+	add.w	d4,(a1)+
+	clr.w	d4
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	add.l	(a2,d1.l),d4
+	add.l	d4,(a1)+
+	move.l	(a2),d0
+	.endm
+
+A2PD1	.macro
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),d0
+	add.w	2(a2,d1.l),d0
+	move.w	d0,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d4
+	swap	d4
+	move.w	d4,(a1)+
+	clr.w	d4
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	add.l	(a2,d1.l),d4
+	move.l	d4,(a1)+
+	move.l	(a2),d0
+	.endm
+
+*************************************************
+*  DPCM → ADPCM 変換ﾏｸﾛ			*
+*						*
+* IN	D0.w	DPCM誤差			*
+*	D2.w	0 (ﾜｰｸ用)			*
+*	A0	ADPCMﾃﾞｰﾀｱﾄﾞﾚｽ			*
+*	(A1)	DPCMﾃﾞｰﾀ			*
+*	A2	変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ1			*
+*	A3	変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ2			*
+*						*
+* OUT	D0.w	新しいDPCM誤差			*
+*	D2.b	不定				*
+*	(A0)	ADPCMﾃﾞｰﾀ(A0は+1される)		*
+*	A1	+4される			*
+*	A2	次の変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ1		*
+*						*
+* WORK	D1.w					*
+*************************************************
+
+PCM2AD	.macro
+	add.w	(a1)+,d0
+	move.b	(a3,d0.w),d2		* 変化を128通りに抑えているため音質が低下する
+	adda.w	d2,a2
+	move.b	(a2),d1
+	sub.w	256(a2),d0
+	adda.w	512(a2),a2
+	add.w	(a1)+,d0
+	move.b	(a3,d0.w),d2
+	adda.w	d2,a2
+	or.w	(a2),d1
+	move.b	d1,(a0)+
+	sub.w	256(a2),d0
+	adda.w	512(a2),a2
+	.endm
+
+*************************************************
+*  16/8bit PCM 音量変換ﾏｸﾛ			*
+*						*
+* IN	D1.b	音量変換用ｼﾌﾄ回数1		*
+*	D4.b	音量変換用ｼﾌﾄ回数2		*
+*	(A0)	PCMﾃﾞｰﾀ				*
+* OUT	(A1)	PCMﾃﾞｰﾀ				*
+* WORK	D0.w					*
+*	D5.w					*
+*	A2.l					*
+*************************************************
+
+PCM00	.macro
+	movem.l	(a0)+,d0-d1/d4-d5
+	add.l	d0,(a1)+
+	add.l	d1,(a1)+
+	add.l	d4,(a1)+
+	add.l	d5,(a1)+
+	.endm			* 12ﾊﾞｲﾄ
+
+PCM01	.macro
+	movem.l	(a0)+,d0-d1/d4-d5
+	movem.l	d0-d1/d4-d5,(a1)
+	lea	16(a1),a1
+	.endm			* 12ﾊﾞｲﾄ
+
+PCM10	.macro
+	move.w	(a0)+,d0
+	asl.w	d1,d0
+	add.w	d0,(a1)+
+	.endm			* 6ﾊﾞｲﾄ
+
+PCM11	.macro
+	move.w	(a0)+,d0
+	asl.w	d1,d0
+	move.w	d0,(a1)+
+	.endm			* 6ﾊﾞｲﾄ
+
+PCM20	.macro
+	move.w	(a0)+,d0
+	asl.w	d1,d0
+	move.w	d0,d4
+	add.w	d0,d0
+	add.w	d4,d0
+	add.w	d0,(a1)+
+	.endm			* 12ﾊﾞｲﾄ
+
+PCM21	.macro
+	move.w	(a0)+,d0
+	asl.w	d1,d0
+	move.w	d0,d4
+	add.w	d0,d0
+	add.w	d4,d0
+	move.w	d0,(a1)+
+	.endm			* 12ﾊﾞｲﾄ
+
+PCM30	.macro
+	move.w	(a0)+,d0
+	asl.w	d1,d0
+	move.w	d0,d4
+	add.w	d0,d0
+	add.w	d0,d0
+	add.w	d4,d0
+	add.w	d0,(a1)+
+	.endm			* 14ﾊﾞｲﾄ
+
+PCM31	.macro
+	move.w	(a0)+,d0
+	asl.w	d1,d0
+	move.w	d0,d4
+	add.w	d0,d0
+	add.w	d0,d0
+	add.w	d4,d0
+	move.w	d0,(a1)+
+	.endm			* 14ﾊﾞｲﾄ
+
+PCM40	.macro
+	move.w	(a0)+,d0
+	move.w	d0,d4
+	asr.w	d1,d4
+	add.w	d4,d0
+	add.w	d0,(a1)+
+	.endm			* 10ﾊﾞｲﾄ
+
+PCM41	.macro
+	move.w	(a0)+,d0
+	move.w	d0,d4
+	asr.w	d1,d4
+	add.w	d4,d0
+	move.w	d0,(a1)+
+	.endm			* 10ﾊﾞｲﾄ
+
+PCM50	.macro
+	move.w	(a0)+,d0
+	move.w	d0,d4
+	asr.w	#1,d4
+	add.w	d0,d0
+	add.w	d4,d0
+	add.w	d0,(a1)+
+	.endm			* 12ﾊﾞｲﾄ
+
+PCM51	.macro
+	move.w	(a0)+,d0
+	move.w	d0,d4
+	asr.w	#1,d4
+	add.w	d0,d0
+	add.w	d4,d0
+	move.w	d0,(a1)+
+	.endm			* 12ﾊﾞｲﾄ
+
+PCM60	.macro
+	move.w	(a0)+,d0
+	asr.w	d1,d0
+	add.w	d0,(a1)+
+	.endm			* 6ﾊﾞｲﾄ
+
+PCM61	.macro
+	move.w	(a0)+,d0
+	asr.w	d1,d0
+	move.w	d0,(a1)+
+	.endm			* 6ﾊﾞｲﾄ
+
+PCM70	.macro
+	move.w	(a0)+,d0
+	asr.w	d1,d0
+	move.w	d0,d4
+	asr.w	d5,d4
+	add.w	d4,d0
+	add.w	d0,(a1)+
+	.endm			* 12ﾊﾞｲﾄ
+
+PCM71	.macro
+	move.w	(a0)+,d0
+	asr.w	d1,d0
+	move.w	d0,d4
+	asr.w	d5,d4
+	add.w	d4,d0
+	move.w	d0,(a1)+
+	.endm			* 12ﾊﾞｲﾄ
+
+PC800	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	add.w	d0,(a1)+
+	.endm			* 6ﾊﾞｲﾄ
+
+PC801	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	move.w	d0,(a1)+
+	.endm			* 6ﾊﾞｲﾄ
+
+PC810	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	asl.w	d1,d0
+	add.w	d0,(a1)+
+	.endm			* 8ﾊﾞｲﾄ
+
+PC811	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	asl.w	d1,d0
+	move.w	d0,(a1)+
+	.endm			* 8ﾊﾞｲﾄ
+
+PC820	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	asl.w	d1,d0
+	move.w	d0,d4
+	add.w	d0,d0
+	add.w	d4,d0
+	add.w	d0,(a1)+
+	.endm			* 14ﾊﾞｲﾄ
+
+PC821	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	asl.w	d1,d0
+	move.w	d0,d4
+	add.w	d0,d0
+	add.w	d4,d0
+	move.w	d0,(a1)+
+	.endm			* 14ﾊﾞｲﾄ
+
+PC830	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	asl.w	d1,d0
+	move.w	d0,d4
+	add.w	d0,d0
+	add.w	d0,d0
+	add.w	d4,d0
+	add.w	d0,(a1)+
+	.endm			* 16ﾊﾞｲﾄ
+
+PC831	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	asl.w	d1,d0
+	move.w	d0,d4
+	add.w	d0,d0
+	add.w	d0,d0
+	add.w	d4,d0
+	move.w	d0,(a1)+
+	.endm			* 16ﾊﾞｲﾄ
+
+PC840	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	move.w	d0,d4
+	asr.w	d1,d4
+	add.w	d4,d0
+	add.w	d0,(a1)+
+	.endm			* 12ﾊﾞｲﾄ
+
+PC841	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	move.w	d0,d4
+	asr.w	d1,d4
+	add.w	d4,d0
+	move.w	d0,(a1)+
+	.endm			* 12ﾊﾞｲﾄ
+
+PC850	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	move.w	d0,d4
+	asr.w	#1,d4
+	add.w	d0,d0
+	add.w	d4,d0
+	add.w	d0,(a1)+
+	.endm			* 14ﾊﾞｲﾄ
+
+PC851	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	move.w	d0,d4
+	asr.w	#1,d4
+	add.w	d0,d0
+	add.w	d4,d0
+	move.w	d0,(a1)+
+	.endm			* 14ﾊﾞｲﾄ
+
+PC860	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	asr.w	d1,d0
+	add.w	d0,(a1)+
+	.endm			* 8ﾊﾞｲﾄ
+
+PC861	.macro
+	move.b	(a0)+,d0
+	ext.w	d0
+	asr.w	d1,d0
+	move.w	d0,(a1)+
+	.endm			* 8ﾊﾞｲﾄ
+
+PC870	.macro
+	move.b	(a0)+,d4
+	move.b	(a2,d4.w),d0
+	ext.w	d0
+	add.w	d0,(a1)+
+	.endm			* 10ﾊﾞｲﾄ
+
+PC871	.macro
+	move.b	(a0)+,d4
+	move.b	(a2,d4.w),d0
+	ext.w	d0
+	move.w	d0,(a1)+
+	.endm			* 10ﾊﾞｲﾄ
+
+*-------
+PCMA	.macro	PCMA1
+	.local	PCMAA,PCMAA1,PCMAA2,PCMAA3
+	.local	PCMAB,PCMAB1,PCMAB2,PCMAB3
+	.local	PCMAX,PCMAX1
+	.dc.w	PCMAB-PCMAA	* 1回目の処理ｱﾄﾞﾚｽ
+
+PCMAA:	moveq	#PCMA1,d1
+	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PCMAA1(pc,d4.w),d4
+	jmp	PCMAA2(pc,d4.w)
+
+PCMAA1:	.dc.b	48,42,36,30	* PCM10:6ﾊﾞｲﾄ
+	.dc.b	24,18,12,6
+
+PCMAA2:	PCM10
+	PCM10
+	PCM10
+	PCM10
+	PCM10
+	PCM10
+	PCM10
+	PCM10
+PCMAA3:	dbra	d3,PCMAA2
+	jmp	(a4)
+
+	.dc.w	PCMAX-PCMAB	* 残りを埋める処理のｱﾄﾞﾚｽ
+
+PCMAB:	moveq	#PCMA1,d1
+	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PCMAB1(pc,d4.w),d4
+	jmp	PCMAB2(pc,d4.w)
+
+PCMAB1:	.dc.b	48,42,36,30	* PCM11:6ﾊﾞｲﾄ
+	.dc.b	24,18,12,6
+
+PCMAB2:	PCM11
+	PCM11
+	PCM11
+	PCM11
+	PCM11
+	PCM11
+	PCM11
+	PCM11
+PCMAB3:	dbra	d3,PCMAB2
+	jmp	(a4)
+
+PCMAX:	lsr.w	#1,d3
+	dbra	d3,PCMAX1
+	jmp	(a4)
+PCMAX1:	move.w	d0,(a1)+
+	dbra	d3,PCMAX1
+	jmp	(a4)
+
+	.endm
+
+*-------
+PCMB	.macro	PCMB1
+	.local	PCMBA,PCMBA1,PCMBA2,PCMBA3
+	.local	PCMBB,PCMBB1,PCMBB2,PCMBB3
+	.local	PCMBX,PCMBX1
+	.dc.w	PCMBB-PCMBA	* 1回目の処理ｱﾄﾞﾚｽ
+
+PCMBA:	moveq	#PCMB1,d1
+	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PCMBA1(pc,d4.w),d4
+	jmp	PCMBA2(pc,d4.w)
+
+PCMBA1:	.dc.b	96,84,72,60	* PCM20:12ﾊﾞｲﾄ
+	.dc.b	48,36,24,12
+
+PCMBA2:	PCM20
+	PCM20
+	PCM20
+	PCM20
+	PCM20
+	PCM20
+	PCM20
+	PCM20
+PCMBA3:	dbra	d3,PCMBA2
+	jmp	(a4)
+
+	.dc.w	PCMBX-PCMBB	* 残りを埋める処理のｱﾄﾞﾚｽ
+
+PCMBB:	moveq	#PCMB1,d1
+	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PCMBB1(pc,d4.w),d4
+	jmp	PCMBB2(pc,d4.w)
+
+PCMBB1:	.dc.b	96,84,72,60	* PCM21:12ﾊﾞｲﾄ
+	.dc.b	48,36,24,12
+
+PCMBB2:	PCM21
+	PCM21
+	PCM21
+	PCM21
+	PCM21
+	PCM21
+	PCM21
+	PCM21
+PCMBB3:	dbra	d3,PCMBB2
+	jmp	(a4)
+
+PCMBX:	lsr.w	#1,d3
+	dbra	d3,PCMBX1
+	jmp	(a4)
+PCMBX1:	move.w	d0,(a1)+
+	dbra	d3,PCMBX1
+	jmp	(a4)
+
+	.endm
+
+*-------
+PCMC	.macro	PCMC1
+	.local	PCMCA,PCMCA1,PCMCA2,PCMCA3
+	.local	PCMCB,PCMCB1,PCMCB2,PCMCB3
+	.local	PCMCX,PCMCX1
+	.dc.w	PCMCB-PCMCA	* 1回目の処理ｱﾄﾞﾚｽ
+
+PCMCA:	moveq	#PCMC1,d1
+	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PCMCA1(pc,d4.w),d4
+	jmp	PCMCA2(pc,d4.w)
+
+PCMCA1:	.dc.b	112,98,84,70	* PCM30:14ﾊﾞｲﾄ
+	.dc.b	56,42,28,14
+
+PCMCA2:	PCM30
+	PCM30
+	PCM30
+	PCM30
+	PCM30
+	PCM30
+	PCM30
+	PCM30
+PCMCA3:	dbra	d3,PCMCA2
+	jmp	(a4)
+
+	.dc.w	PCMCX-PCMCB	* 残りを埋める処理のｱﾄﾞﾚｽ
+
+PCMCB:	moveq	#PCMC1,d1
+	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PCMCB1(pc,d4.w),d4
+	jmp	PCMCB2(pc,d4.w)
+
+PCMCB1:	.dc.b	112,98,84,70	* PCM31:14ﾊﾞｲﾄ
+	.dc.b	56,42,28,14
+
+PCMCB2:	PCM31
+	PCM31
+	PCM31
+	PCM31
+	PCM31
+	PCM31
+	PCM31
+	PCM31
+PCMCB3:	dbra	d3,PCMCB2
+	jmp	(a4)
+
+PCMCX:	lsr.w	#1,d3
+	dbra	d3,PCMCX1
+	jmp	(a4)
+PCMCX1:	move.w	d0,(a1)+
+	dbra	d3,PCMCX1
+	jmp	(a4)
+
+	.endm
+
+*-------
+PCMD	.macro	PCMD1
+	.local	PCMDA,PCMDA1,PCMDA2,PCMDA3
+	.local	PCMDB,PCMDB1,PCMDB2,PCMDB3
+	.local	PCMDX,PCMDX1
+	.dc.w	PCMDB-PCMDA	* 1回目の処理ｱﾄﾞﾚｽ
+
+PCMDA:	moveq	#PCMD1,d1
+	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PCMDA1(pc,d4.w),d4
+	jmp	PCMDA2(pc,d4.w)
+
+PCMDA1:	.dc.b	80,70,60,50	* PCM40:10ﾊﾞｲﾄ
+	.dc.b	40,30,20,10
+
+PCMDA2:	PCM40
+	PCM40
+	PCM40
+	PCM40
+	PCM40
+	PCM40
+	PCM40
+	PCM40
+PCMDA3:	dbra	d3,PCMDA2
+	jmp	(a4)
+
+	.dc.w	PCMDX-PCMDB	* 残りを埋める処理のｱﾄﾞﾚｽ
+
+PCMDB:	moveq	#PCMD1,d1
+	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PCMDB1(pc,d4.w),d4
+	jmp	PCMDB2(pc,d4.w)
+
+PCMDB1:	.dc.b	80,70,60,50	* PCM41:10ﾊﾞｲﾄ
+	.dc.b	40,30,20,10
+
+PCMDB2:	PCM41
+	PCM41
+	PCM41
+	PCM41
+	PCM41
+	PCM41
+	PCM41
+	PCM41
+PCMDB3:	dbra	d3,PCMDB2
+	jmp	(a4)
+
+PCMDX:	lsr.w	#1,d3
+	dbra	d3,PCMDX1
+	jmp	(a4)
+PCMDX1:	move.w	d0,(a1)+
+	dbra	d3,PCMDX1
+	jmp	(a4)
+
+	.endm
+
+*-------
+PCME	.macro	PCME1
+	.local	PCMEA,PCMEA1,PCMEA2,PCMEA3
+	.local	PCMEB,PCMEB1,PCMEB2,PCMEB3
+	.local	PCMEX,PCMEX1
+	.dc.w	PCMEB-PCMEA	* 1回目の処理ｱﾄﾞﾚｽ
+
+PCMEA:	moveq	#PCME1,d1
+	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PCMEA1(pc,d4.w),d4
+	jmp	PCMEA2(pc,d4.w)
+
+PCMEA1:	.dc.b	48,42,36,30	* PCM60:6ﾊﾞｲﾄ
+	.dc.b	24,18,12,6
+
+PCMEA2:	PCM60
+	PCM60
+	PCM60
+	PCM60
+	PCM60
+	PCM60
+	PCM60
+	PCM60
+PCMEA3:	dbra	d3,PCMEA2
+	jmp	(a4)
+
+	.dc.w	PCMEX-PCMEB	* 残りを埋める処理のｱﾄﾞﾚｽ
+
+PCMEB:	moveq	#PCME1,d1
+	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PCMEB1(pc,d4.w),d4
+	jmp	PCMEB2(pc,d4.w)
+
+PCMEB1:	.dc.b	48,42,36,30	* PCM61:6ﾊﾞｲﾄ
+	.dc.b	24,18,12,6
+
+PCMEB2:	PCM61
+	PCM61
+	PCM61
+	PCM61
+	PCM61
+	PCM61
+	PCM61
+	PCM61
+PCMEB3:	dbra	d3,PCMEB2
+	jmp	(a4)
+
+PCMEX:	lsr.w	#1,d3
+	dbra	d3,PCMEX1
+	jmp	(a4)
+PCMEX1:	move.w	d0,(a1)+
+	dbra	d3,PCMEX1
+	jmp	(a4)
+
+	.endm
+
+*-------
+PCMF	.macro	PCMF1,PCMF2
+	.local	PCMFA,PCMFA1,PCMFA2,PCMFA3
+	.local	PCMFB,PCMFB1,PCMFB2,PCMFB3
+	.local	PCMFX,PCMFX1
+	.dc.w	PCMFB-PCMFA	* 1回目の処理ｱﾄﾞﾚｽ
+
+PCMFA:	moveq	#PCMF1,d1
+	moveq	#PCMF2,d5
+	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PCMFA1(pc,d4.w),d4
+	jmp	PCMFA2(pc,d4.w)
+
+PCMFA1:	.dc.b	96,84,72,60	* PCM70:12ﾊﾞｲﾄ
+	.dc.b	48,36,24,12
+
+PCMFA2:	PCM70
+	PCM70
+	PCM70
+	PCM70
+	PCM70
+	PCM70
+	PCM70
+	PCM70
+PCMFA3:	dbra	d3,PCMFA2
+	jmp	(a4)
+
+	.dc.w	PCMFX-PCMFB	* 残りを埋める処理のｱﾄﾞﾚｽ
+
+PCMFB:	moveq	#PCMF1,d1
+	moveq	#PCMF2,d5
+	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PCMFB1(pc,d4.w),d4
+	jmp	PCMFB2(pc,d4.w)
+
+PCMFB1:	.dc.b	96,84,72,60	* PCM71:12ﾊﾞｲﾄ
+	.dc.b	48,36,24,12
+
+PCMFB2:	PCM71
+	PCM71
+	PCM71
+	PCM71
+	PCM71
+	PCM71
+	PCM71
+	PCM71
+PCMFB3:	dbra	d3,PCMFB2
+	jmp	(a4)
+
+PCMFX:	lsr.w	#1,d3
+	dbra	d3,PCMFX1
+	jmp	(a4)
+PCMFX1:	move.w	d0,(a1)+
+	dbra	d3,PCMFX1
+	jmp	(a4)
+
+	.endm
+
+*-------
+PC8A	.macro	PC8A1
+	.local	PC8AA,PC8AA1,PC8AA2,PC8AA3
+	.local	PC8AB,PC8AB1,PC8AB2,PC8AB3
+	.local	PC8AX,PC8AX1
+	.dc.w	PC8AB-PC8AA	* 1回目の処理ｱﾄﾞﾚｽ
+
+PC8AA:	moveq	#PC8A1,d1
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PC8AA1(pc,d4.w),d4
+	jmp	PC8AA2(pc,d4.w)
+
+PC8AA1:	.dc.b	64,56,48,40	* PC810:8ﾊﾞｲﾄ
+	.dc.b	32,24,16,8
+
+PC8AA2:	PC810
+	PC810
+	PC810
+	PC810
+	PC810
+	PC810
+	PC810
+	PC810
+PC8AA3:	dbra	d3,PC8AA2
+	jmp	(a4)
+
+	.dc.w	PC8AX-PC8AB	* 残りを埋める処理のｱﾄﾞﾚｽ
+
+PC8AB:	moveq	#PC8A1,d1
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PC8AB1(pc,d4.w),d4
+	jmp	PC8AB2(pc,d4.w)
+
+PC8AB1:	.dc.b	64,56,48,40	* PC811:8ﾊﾞｲﾄ
+	.dc.b	32,24,16,8
+
+PC8AB2:	PC811
+	PC811
+	PC811
+	PC811
+	PC811
+	PC811
+	PC811
+	PC811
+PC8AB3:	dbra	d3,PC8AB2
+	jmp	(a4)
+
+PC8AX1:	move.w	d0,(a1)+
+PC8AX:	dbra	d3,PC8AX1
+	jmp	(a4)
+
+	.endm
+
+*-------
+PC8B	.macro	PC8B1
+	.local	PC8BA,PC8BA1,PC8BA2,PC8BA3
+	.local	PC8BB,PC8BB1,PC8BB2,PC8BB3
+	.local	PC8BX,PC8BX1
+	.dc.w	PC8BB-PC8BA	* 1回目の処理ｱﾄﾞﾚｽ
+
+PC8BA:	moveq	#PC8B1,d1
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PC8BA1(pc,d4.w),d4
+	jmp	PC8BA2(pc,d4.w)
+
+PC8BA1:	.dc.b	112,98,84,70	* PC820:14ﾊﾞｲﾄ
+	.dc.b	56,42,28,14
+
+PC8BA2:	PC820
+	PC820
+	PC820
+	PC820
+	PC820
+	PC820
+	PC820
+	PC820
+PC8BA3:	dbra	d3,PC8BA2
+	jmp	(a4)
+
+	.dc.w	PC8BX-PC8BB	* 残りを埋める処理のｱﾄﾞﾚｽ
+
+PC8BB:	moveq	#PC8B1,d1
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PC8BB1(pc,d4.w),d4
+	jmp	PC8BB2(pc,d4.w)
+
+PC8BB1:	.dc.b	112,98,84,70	* PC821:14ﾊﾞｲﾄ
+	.dc.b	56,42,28,14
+
+PC8BB2:	PC821
+	PC821
+	PC821
+	PC821
+	PC821
+	PC821
+	PC821
+	PC821
+PC8BB3:	dbra	d3,PC8BB2
+	jmp	(a4)
+
+PC8BX1:	move.w	d0,(a1)+
+PC8BX:	dbra	d3,PC8BX1
+	jmp	(a4)
+
+	.endm
+
+*-------
+PC8C	.macro	PC8C1
+	.local	PC8CA,PC8CA1,PC8CA2,PC8CA3
+	.local	PC8CB,PC8CB1,PC8CB2,PC8CB3
+	.local	PC8CX,PC8CX1
+	.dc.w	PC8CB-PC8CA	* 1回目の処理ｱﾄﾞﾚｽ
+
+PC8CA:	moveq	#PC8C1,d1
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PC8CA1(pc,d4.w),d4
+	jmp	PC8CA3(pc,d4.w)
+
+PC8CA1:	.dc.b	112,96,80,64	* PC830:16ﾊﾞｲﾄ
+	.dc.b	48,32,16,0
+
+PC8CA2:	PC830
+PC8CA3:	PC830
+	PC830
+	PC830
+	PC830
+	PC830
+	PC830
+	PC830
+	dbra	d3,PC8CA2
+	jmp	(a4)
+
+	.dc.w	PC8CX-PC8CB	* 残りを埋める処理のｱﾄﾞﾚｽ
+
+PC8CB:	moveq	#PC8C1,d1
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PC8CB1(pc,d4.w),d4
+	jmp	PC8CB3(pc,d4.w)
+
+PC8CB1:	.dc.b	112,96,80,64	* PC831:16ﾊﾞｲﾄ
+	.dc.b	48,32,16,0
+
+PC8CB2:	PC831
+PC8CB3:	PC831
+	PC831
+	PC831
+	PC831
+	PC831
+	PC831
+	PC831
+	dbra	d3,PC8CB2
+	jmp	(a4)
+
+PC8CX1:	move.w	d0,(a1)+
+PC8CX:	dbra	d3,PC8CX1
+	jmp	(a4)
+
+	.endm
+
+*-------
+PC8D	.macro	PC8D1
+	.local	PC8DA,PC8DA1,PC8DA2,PC8DA3
+	.local	PC8DB,PC8DB1,PC8DB2,PC8DB3
+	.local	PC8DX,PC8DX1
+	.dc.w	PC8DB-PC8DA	* 1回目の処理ｱﾄﾞﾚｽ
+
+PC8DA:	moveq	#PC8D1,d1
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PC8DA1(pc,d4.w),d4
+	jmp	PC8DA2(pc,d4.w)
+
+PC8DA1:	.dc.b	96,84,72,60	* PC840:12ﾊﾞｲﾄ
+	.dc.b	48,36,24,12
+
+PC8DA2:	PC840
+	PC840
+	PC840
+	PC840
+	PC840
+	PC840
+	PC840
+	PC840
+PC8DA3:	dbra	d3,PC8DA2
+	jmp	(a4)
+
+	.dc.w	PC8DX-PC8DB	* 残りを埋める処理のｱﾄﾞﾚｽ
+
+PC8DB:	moveq	#PC8D1,d1
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PC8DB1(pc,d4.w),d4
+	jmp	PC8DB2(pc,d4.w)
+
+PC8DB1:	.dc.b	96,84,72,60	* PC841:12ﾊﾞｲﾄ
+	.dc.b	48,36,24,12
+
+PC8DB2:	PC841
+	PC841
+	PC841
+	PC841
+	PC841
+	PC841
+	PC841
+	PC841
+PC8DB3:	dbra	d3,PC8DB2
+	jmp	(a4)
+
+PC8DX1:	move.w	d0,(a1)+
+PC8DX:	dbra	d3,PC8DX1
+	jmp	(a4)
+
+	.endm
+
+*-------
+PC8E	.macro	PC8E1
+	.local	PC8EA,PC8EA1,PC8EA2,PC8EA3
+	.local	PC8EB,PC8EB1,PC8EB2,PC8EB3
+	.local	PC8EX,PC8EX1
+	.dc.w	PC8EB-PC8EA	* 1回目の処理ｱﾄﾞﾚｽ
+
+PC8EA:	moveq	#PC8E1,d1
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PC8EA1(pc,d4.w),d4
+	jmp	PC8EA2(pc,d4.w)
+
+PC8EA1:	.dc.b	64,56,48,40	* PC860:8ﾊﾞｲﾄ
+	.dc.b	32,24,16,8
+
+PC8EA2:	PC860
+	PC860
+	PC860
+	PC860
+	PC860
+	PC860
+	PC860
+	PC860
+PC8EA3:	dbra	d3,PC8EA2
+	jmp	(a4)
+
+	.dc.w	PC8EX-PC8EB	* 残りを埋める処理のｱﾄﾞﾚｽ
+
+PC8EB:	moveq	#PC8E1,d1
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PC8EB1(pc,d4.w),d4
+	jmp	PC8EB2(pc,d4.w)
+
+PC8EB1:	.dc.b	64,56,48,40	* PC861:8ﾊﾞｲﾄ
+	.dc.b	32,24,16,8
+
+PC8EB2:	PC861
+	PC861
+	PC861
+	PC861
+	PC861
+	PC861
+	PC861
+	PC861
+PC8EB3:	dbra	d3,PC8EB2
+	jmp	(a4)
+
+PC8EX1:	move.w	d0,(a1)+
+PC8EX:	dbra	d3,PC8EX1
+	jmp	(a4)
+
+	.endm
+
+*-------
+PC8F	.macro
+	.local	PC8FA,PC8FA1,PC8FA2,PC8FA3
+	.local	PC8FB,PC8FB1,PC8FB2,PC8FB3
+	.local	PC8FX,PC8FX1,PC8FY
+	.dc.w	PC8FB-PC8FA	* 1回目の処理ｱﾄﾞﾚｽ
+
+PC8FA:	lea	PC8FY(pc),a2
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PC8FA1(pc,d4.w),d4
+	jmp	PC8FA2(pc,d4.w)
+
+PC8FA1:	.dc.b	80,70,60,50	* PC870:10ﾊﾞｲﾄ
+	.dc.b	40,30,20,10
+
+PC8FA2:	PC870
+	PC870
+	PC870
+	PC870
+	PC870
+	PC870
+	PC870
+	PC870
+PC8FA3:	dbra	d3,PC8FA2
+	jmp	(a4)
+
+	.dc.w	PC8FX-PC8FB	* 残りを埋める処理のｱﾄﾞﾚｽ
+
+PC8FB:	lea	PC8FY(pc),a2
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	PC8FB1(pc,d4.w),d4
+	jmp	PC8FB2(pc,d4.w)
+
+PC8FB1:	.dc.b	80,70,60,50	* PC871:10ﾊﾞｲﾄ
+	.dc.b	40,30,20,10
+
+PC8FB2:	PC871
+	PC871
+	PC871
+	PC871
+	PC871
+	PC871
+	PC871
+	PC871
+PC8FB3:	dbra	d3,PC8FB2
+	jmp	(a4)
+
+PC8FX1:	move.w	d0,(a1)+
+PC8FX:	dbra	d3,PC8FX1
+	jmp	(a4)
+
+PC8FY:
+	.endm
+
+*--------------------------------------------------------------------
+*	ここからプログラム本体
+*--------------------------------------------------------------------
+*	ﾃﾞﾊﾞｲｽﾄﾞﾗｲﾊﾞﾍｯﾀﾞ
+
+TOPADR:	.dc.l	-1			* ｺﾏﾝﾄﾞﾗｲﾝからの常駐ではここに'PCM8/048'と
+	.dc.w	$C020			* trap #2 ｴﾝﾄﾘへの bra 命令を置く
+	.dc.l	ENTSET
+	.dc.l	DEVENT
+DEVNAM:	.dc.b	'PCM     '		* ﾃﾞﾊﾞｲｽﾄﾞﾗｲﾊﾞ名(8文字)
+
+HEADD1:	.dc.b	'PCM8A Header'		* PCM8A 認識用ﾃﾞｰﾀ(12文字)
+HEADD2:	.dc.l	T2KEEP
+
+ENTWK:	.dc.l	0
+
+ENTSET:	move.l	a5,ENTWK
+	rts
+
+DEVENT:	movem.l	d0/a5,-(sp)
+	movea.l	ENTWK(pc),a5
+	moveq	#0,d0
+	move.b	2(a5),d0
+	cmpi.b	#13,d0
+	bcs	DEVEN1
+	moveq	#1,d0
+DEVEN1:	add.w	d0,d0
+	move.w	JTBL(pc,d0.w),d0
+	jsr	JTBL(pc,d0.w)
+	move.b	d0,3(a5)
+	move.w	d0,-(sp)
+	move.b	(sp)+,4(a5)
+	movem.l	(sp)+,d0/a5
+	rts
+
+JTBL:	.dc.w	DEVINI-JTBL
+	.dc.w	DEVERR-JTBL
+	.dc.w	DEVERR-JTBL
+	.dc.w	DEVCHK-JTBL
+	.dc.w	DEVIN-JTBL
+	.dc.w	DEVNOP-JTBL
+	.dc.w	DEVNOP-JTBL
+	.dc.w	DEVNOP-JTBL
+	.dc.w	DEVOUT-JTBL
+	.dc.w	DEVOUT-JTBL
+	.dc.w	DEVNOP-JTBL
+	.dc.w	DEVERR-JTBL
+	.dc.w	DEVMOD-JTBL
+
+DEVINI:	jmp	DEVSET			* 実行後 bra DEVERR に書き替えられる
+
+DEVERR:	move.w	#$5003,d0
+	rts
+
+DEVIN:	movem.l	d1-d2/a1,-(sp)
+	move.l	$12(a5),d2
+	movea.l	$E(a5),a1
+	move.w	DEVMD(pc),d1
+	IOCS	_ADPCMINP
+	bra	DEVOU1
+
+DEVOUT:	movem.l	d1-d2/a1,-(sp)
+	move.l	$12(a5),d2
+	movea.l	$E(a5),a1
+	move.w	DEVMD(pc),d1
+	IOCS	_ADPCMOUT
+DEVOU1:	movem.l	(sp)+,d1-d2/a1
+	bra	DEVNOP
+
+DEVCHK:	move.l	a1,-(sp)
+	IOCS	_ADPCMSNS
+	movea.l	$E(a5),a1
+	move.b	d0,(a1)
+	bra	DEVMO1
+
+DEVMOD:	move.l	a1,-(sp)
+	movea.l	$E(a5),a1
+	move.b	(a1)+,DEVMD
+	move.b	(a1)+,DEVMD+1
+DEVMO1:	movea.l	(sp)+,a1
+
+DEVNOP:	moveq	#0,d0
+	rts
+
+DEVMD:	.dc.w	$0403
+
+DEVEND:
+*--------------------------------------------------------------------
+*	IOCS用ｴﾝﾄﾘ
+
+IOCS63:	movem.l	a0/a5-a6,-(sp)		* ｱﾚｲﾁｪｰﾝ入力
+	movea.l	VEC63W(pc),a0
+	bra	IOCSRX
+
+IOCS65:	movem.l	a0/a5-a6,-(sp)		* ﾘﾝｸｱﾚｲﾁｪｰﾝ入力
+	movea.l	VEC65W(pc),a0
+	bra	IOCSRX
+
+IOCS61:	movem.l	a0/a5-a6,-(sp)		* 通常入力
+	movea.l	VEC61W(pc),a0
+IOCSRX:	lea	WK(pc),a6
+	bsr	T2KILL			* PCM8A停止
+	move.l	a0,d0
+	addq.l	#2,d0
+	bcs	IOCSR3
+	suba.l	a5,a5
+	jsr	(a0)			* 元(ROM)のﾙｰﾁﾝへ
+IOCSR3:	movem.l	(sp)+,a0/a5-a6
+	rts
+
+IOCS62:	movem.l	d1/a5-a6,-(sp)		* ｱﾚｲﾁｪｰﾝ出力
+	swap	d1
+	move.w	#$1108,d1
+	bra	IOCS1
+
+IOCS64:	movem.l	d1/a5-a6,-(sp)		* ﾘﾝｸｱﾚｲﾁｪｰﾝ出力
+	swap	d1
+	move.w	#$1208,d1
+	bra	IOCS1
+
+IOCS60:	movem.l	d1/a5-a6,-(sp)		* 通常出力
+	swap	d1
+	move.w	#$1008,d1
+IOCS1:	swap	d1
+	lea	WK(pc),a6
+	move.w	sr,-(sp)
+	tst.b	SYSFLG-WK(a6)
+	bmi	IOCSM
+	tst.b	IOFLG-WK(a6)
+	beq	IOCS12
+	move.l	d1,-(sp)
+	movea.l	CHNWK-WK(a6),a5
+	moveq	#-1,d0
+	add.w	PCMCHN-WK(a6),d0
+	moveq	#8,d1
+IOCS11:	or.b	d1,(a5)
+	lea	$20(a5),a5
+	dbra	d0,IOCS11
+	move.l	(sp)+,d1
+IOCS12:	moveq	#7,d0			* ﾁｬﾝﾈﾙｻｰﾁ中のADPCM割り込みを禁止
+	and.b	(sp),d0
+	cmpi.b	#3,d0
+	bcc	IOCS5
+	ori.w	#$0300,sr
+IOCS5:	bsr	CHNSRC
+	move.b	d0,IOCHNW-WK(a6)
+	bmi	IOCSE1
+	movea.l	CHNWK-WK(a6),a5
+	ext.w	d0
+	lsl.w	#5,d0
+	adda.w	d0,a5
+	bset	#5,(a5)
+	bne	IOCS5
+	bset	#4,(a5)
+	bsr	T2EXE10
+	bclr	#5,(a5)
+IOCS4:	move.w	(sp)+,sr
+IOCS2:	moveq	#0,d0
+IOCS3:	movem.l	(sp)+,d1/a5-a6
+	rts
+
+IOCSM:	tst.b	IOCHN-WK(a6)		* 単音再生ﾓｰﾄﾞ
+	beq	IOCSE1
+	bsr	T2EXE10
+	bra	IOCS4
+IOCSE1:	move.w	(sp)+,sr
+IOCSER:	moveq	#-1,d0
+	bra	IOCS3
+
+IOCS66:	movem.l	d1/a5-a6,-(sp)		* 動作ﾓｰﾄﾞﾁｪｯｸ
+	lea	WK(pc),a6
+	moveq	#0,d0
+	move.b	ADIOCS.w,d0
+	cmpi.b	#PCM8FL,d0
+	bne	IOCS3
+	tst.b	SYSFLG-WK(a6)
+	bmi	IOCS66M
+	tst.b	SKPFLG-WK(a6)
+	bne	IOCS2
+	move.b	IOCHNW-WK(a6),d0
+	cmp.b	PCMCHN+1-WK(a6),d0
+	bcc	IOCS2
+	movea.l	CHNWK-WK(a6),a5
+	lsl.w	#5,d0
+	move.b	(a5,d0.w),d0
+	bmi	IOCS2			* ﾁｬﾝﾈﾙは停止している
+	btst	#4,d0
+	beq	IOCS2			* IOCS出力ﾁｬﾝﾈﾙではない
+IOCS661:
+	andi.w	#3,d0
+	lsl.w	#4,d0
+	ori.w	#2,d0
+	bra	IOCS3
+
+IOCS66M:				* 単音再生ﾓｰﾄﾞ
+	btst	#0,(a6)
+	beq	IOCS2
+	move.b	M1MOD-WK(a6),d0
+	bra	IOCS661
+
+IOCS67:	movem.l	d1/a5-a6,-(sp)		* 動作制御
+	lea	WK(pc),a6
+	cmpi.l	#'PCM8',d1
+	beq	IOCS673
+	cmpi.l	#'PCMA',d1
+	beq	IOCS674
+	btst	#2,ADIOCS.w
+	bne	IOCS675
+	tst.b	SYSFLG-WK(a6)
+	bmi	IOCS675
+	move.b	IOCHNW-WK(a6),d0
+	cmp.b	PCMCHN+1-WK(a6),d0
+	bcc	IOCS2X
+	movea.l	CHNWK-WK(a6),a5
+	moveq	#-1,d0
+	add.w	PCMCHN-WK(a6),d0
+	subq.b	#1,d1
+	bcc	IOCS671
+	tst.b	IOFLG-WK(a6)
+	bne	IOCS6702
+	move.w	sr,-(sp)
+	moveq	#$DC,d1			* ﾁｪｰﾝ動作終了
+IOCS670:
+	ori.w	#$0700,sr
+	btst	#4,(a5)
+	beq	IOCS6701
+	and.b	d1,(a5)
+IOCS6701:
+	move.w	(sp),sr
+	lea	$20(a5),a5
+	dbra	d0,IOCS670
+	addq.l	#2,sp
+	bra	IOCS2X
+
+IOCS6702:				* 全ﾁｬﾝﾈﾙ一時停止解除禁止
+	moveq	#$8,d1
+IOCS6703:
+	or.b	d1,(a5)
+	lea	$20(a5),a5
+	dbra	d0,IOCS6703
+	sf	IOFLG-WK(a6)
+	bra	IOCS2X
+
+IOCS673:
+	moveq	#48,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8 v0.48)
+	bra	IOCS3X
+
+IOCS674:
+	moveq	#51,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.51)		*;version
+	bra	IOCS3X
+
+IOCS675:				* 単音再生ﾓｰﾄﾞ/録音時動作制御
+	lea	DMACH3+7,a5
+	subq.b	#1,d1
+	bcc	IOCS676
+	btst	#2,ADIOCS.w
+	bne	IOCS678
+	bsr	T2KIL0
+	bra	IOCS2X
+
+IOCS671:
+	subq.b	#1,d1
+	bcc	IOCS672
+	st	IOFLG-WK(a6)
+	move.w	sr,d1
+IOCS6711:				* 一時停止
+	ori.w	#$0700,sr
+	btst	#4,(a5)
+	beq	IOCS6712
+	tas	(a5)
+IOCS6712:
+	move.w	d1,sr
+	lea	$20(a5),a5
+	dbra	d0,IOCS6711
+IOCS2X:	moveq	#0,d0
+IOCS3X:	movem.l	(sp)+,d1/a5-a6
+	rts
+
+IOCS672:
+	bhi	IOCS2X
+	move.w	sr,-(sp)
+IOCS6721:				* 一時停止解除
+	ori.w	#$0700,sr
+	move.b	(a5),d1
+	bpl	IOCS6722
+	btst	#4,d1
+	beq	IOCS6722
+	btst	#3,d1
+	bne	IOCS6722
+	andi.b	#$0F,d1
+	ori.b	#$50,d1
+	move.b	d1,(a5)
+IOCS6722:
+	move.w	(sp),sr
+	lea	$20(a5),a5
+	dbra	d0,IOCS6721
+	addq.l	#2,sp
+	sf	IOFLG-WK(a6)
+	bsr	T2EXE1X
+	bra	IOCS2X
+
+IOCS676:
+	bhi	IOCS677
+	move.b	#$20,(a5)
+	bra	IOCS2X
+IOCS677:
+	move.b	#$08,(a5)
+	bra	IOCS2X
+IOCS678:
+	bsr	T2KILL
+	bra	IOCS2X
+
+CHNSRC:	movem.l	d1-d5/a0-a1,-(sp)	* IOCSﾁｬﾝﾈﾙｻｰﾁ
+	moveq	#-1,d0
+	moveq	#0,d1
+	move.b	IOCHN-WK(a6),d1
+	beq	CHNSRE
+	move.w	d1,d0
+	move.w	PCMCHN-WK(a6),d3
+	move.w	d3,d4
+	sub.w	d0,d3
+	subq.w	#1,d0
+	subq.w	#1,d4
+	lsl.w	#5,d4
+	movea.w	d4,a0
+	adda.l	CHNWK-WK(a6),a0
+	btst	#4,SYSFLG-WK(a6)
+	bne	CHNSR5
+	lea	TIMCA5(pc),a1
+	moveq	#-1,d4
+	moveq	#-1,d5
+CHNSR1:	moveq	#$A3,d1
+	and.b	(a0),d1
+	bmi	CHNSR5
+	bne	CHNSR4
+	moveq	#$F,d1
+	and.b	2(a0),d1
+	move.l	$C(a0),d2		* 残りﾊﾞｲﾄ数
+	add.w	d1,d1
+	move.w	TIMCAL(pc,d1.w),d1
+	jmp	TIMCAL(pc,d1.w)
+
+TIMCAL:	.dc.w	TIMCA0-TIMCAL
+	.dc.w	TIMCA1-TIMCAL
+	.dc.w	TIMCA2-TIMCAL
+	.dc.w	TIMCA3-TIMCAL
+	.dc.w	TIMCA4-TIMCAL
+	.dc.w	TIMCA5-TIMCAL
+	.dc.w	TIMCA6-TIMCAL
+	.dc.w	TIMCA7-TIMCAL
+	.dc.w	TIMCA8-TIMCAL
+	.dc.w	TIMCA9-TIMCAL
+	.dc.w	TIMCAA-TIMCAL
+	.dc.w	TIMCAB-TIMCAL
+	.dc.w	TIMCAC-TIMCAL
+	.dc.w	CHNSR5-TIMCAL
+	.dc.w	CHNSR5-TIMCAL
+	.dc.w	CHNSR5-TIMCAL
+
+TIMCA0:	lsl.l	#4,d2			*16:ADPCM(3.9KHz)
+	jmp	(a1)			* 256Mﾊﾞｲﾄ以上のADPCMﾃﾞｰﾀだと問題があるが…
+
+TIMCA1:	add.l	d2,d2			*12:ADPCM(5.2KHz)
+TIMCA3:	add.l	d2,d2			*6 :ADPCM(10.4KHz)
+TIMCA7:	move.l	d2,d1			*3 :ADPCM(20.8KHz)
+	add.l	d2,d2
+	add.l	d1,d2
+	jmp	(a1)
+
+TIMCA2:	lsl.l	#3,d2			*8 :ADPCM(7.8KHz)
+	jmp	(a1)
+
+TIMCA4:	lsl.l	#2,d2			*4 :ADPCM(15.6KHz)
+	jmp	(a1)
+
+TIMCA8:	lsr.l	#1,d2			*3/4:16bitPCM(20.8KHz)
+TIMCA9:	move.l	d2,d1			*3/2:8bitPCM(20.8KHz)
+	lsr.l	#1,d1
+	add.l	d1,d2
+	jmp	(a1)
+
+TIMCAB:	lsr.l	#1,d2			*1/2:16bitPCM(31.2KHz)
+	jmp	(a1)
+
+TIMCA6:					*2 :8bitPCM(15.6KHz)
+TIMCAA:	add.l	d2,d2			*2 :ADPCM(31.2KHz)
+TIMCA5:					*1 :16bitPCM(15.6KHz)
+TIMCAC:	cmp.l	d2,d4			*1 :8bitPCM(31.2KHz)
+	bls	CHNSR4
+	move.l	d2,d4
+	move.w	d0,d5
+CHNSR4:	lea	-$20(a0),a0
+	dbra	d0,CHNSR1
+	move.w	d5,d0
+	bmi	CHNSRE
+CHNSR5:	add.b	d3,d0
+CHNSRE:	movem.l	(sp)+,d1-d5/a0-a1
+	rts
+
+	.dc.w	0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
+
+	.dc.b	'PCM8A051'		* PCM8A 認識用				*;version
+CHKFLG:	.dc.b	'@PCM/048'		* PCM8 認識用
+
+*--------------------------------------------------------------------
+*	trap #2 ｴﾝﾄﾘ (PCM8A ｻｰﾋﾞｽﾙｰﾁﾝ入口)
+
+T2ENT:	movem.l	d1-d7/a0-a6,-(sp)
+	lea	WK(pc),a6
+	pea	T2END(pc)
+	cmpi.w	#$1000,d0
+	bcc	T2ENTX
+	cmpi.w	#$0100,d0
+	bcc	T2ENT3
+	moveq	#$0F,d3
+	and.w	d0,d3
+T2ENT21:
+	cmp.b	PCMCHN-WK+1(a6),d3
+	bcc	T2ERR
+	lsl.w	#5,d3
+	movea.w	d3,a5
+	adda.l	CHNWK-WK(a6),a5
+	andi.w	#$00F0,d0
+	lsr.w	#2,d0
+	movea.l	T2JTBL(pc,d0.w),a0
+	jmp	(a0)
+T2ERR:	moveq	#-1,d0
+	addq.l	#4,sp
+T2END:	movem.l	(sp)+,d1-d7/a0-a6
+	rte
+
+T2JTBL:	.dc.l	T2EXE1			* $000x:通常出力
+	.dc.l	T2EXE1			* $001x:ｱﾚｲﾁｪｰﾝ出力
+	.dc.l	T2EXE1			* $002x:ﾘﾝｸｱﾚｲﾁｪｰﾝ出力
+	.dc.l	T2ERR			* $003x
+	.dc.l	T2ERR			* $004x
+	.dc.l	T2ERR			* $005x
+	.dc.l	T2ERR			* $006x
+	.dc.l	TBLCNG			* $007x:動作ﾓｰﾄﾞ変更
+	.dc.l	TBLCHK			* $008x:ﾃﾞｰﾀ長問い合わせ
+	.dc.l	TBLMOD			* $009x:動作ﾓｰﾄﾞ問い合わせ
+	.dc.l	TBLADR			* $00Ax:ｱｸｾｽｱﾄﾞﾚｽ問い合わせ
+	.dc.l	T2STOP			* $00Bx:ﾁｬﾝﾈﾙ動作中断
+	.dc.l	T2CONT			* $00Cx:ﾁｬﾝﾈﾙ動作継続
+	.dc.l	T2ERR			* $00Dx
+	.dc.l	T2ERR			* $00Ex
+	.dc.l	T2ERR			* $00Fx
+
+T2ENTX:	cmpi.w	#$2000,d0		* $1nxx:拡張ﾁｬﾝﾈﾙ処理(n:ｺﾏﾝﾄﾞ,xx:ﾁｬﾝﾈﾙ)
+	bcc	T2ENT4
+	moveq	#0,d3
+	move.b	d0,d3
+	lsr.w	#4,d0
+	bra	T2ENT21
+
+T2ENT3:	beq	T2ENT30
+	cmpi.w	#$0200,d0
+	bcc	T2ERR
+	addi.b	#9,d0
+	bcs	T2ENT8
+	cmpi.b	#$D,d0
+	bhi	T2ERR
+	beq	T2ENTB
+	cmpi.b	#$B,d0
+	bcs	T2ENT6
+	beq	T2ENT7
+T2ENTA:	bsr	T2KILL			* $0103:PCM8A停止
+	moveq	#0,d0
+	rts
+
+T2ENTB:	bsr	T2ACTV			* $0104:PCM8A動作
+	moveq	#0,d0
+	rts
+
+T2ENT6:	st	SKPFLG-WK(a6)		* $0101:一時停止
+	moveq	#0,d0
+	rts
+
+T2ENT7:	sf	SKPFLG-WK(a6)		* $0102:一時停止解除
+	bsr	T2EXE1X
+	moveq	#0,d0
+	rts
+
+T2ENT30:
+	btst	#2,ADIOCS.w		* $0100:終了
+	bne	T2ENT34
+	tst.b	SKPFLG-WK(a6)
+	bne	T2ENT33
+	movea.l	CHNWK-WK(a6),a4
+	moveq	#-1,d1
+	add.w	PCMCHN-WK(a6),d1
+	moveq	#$FC,d0			* 現在のﾌﾞﾛｯｸを出力して終了
+T2ENT31:
+	and.b	d0,(a4)
+	lea	$20(a4),a4
+	dbra	d1,T2ENT31
+	moveq	#0,d0
+	rts
+
+T2ENT33:				* 即座に終了
+	move.w	sr,d2
+	ori.w	#$0700,sr
+	lea	DMACH3,a5
+	bsr	DMASP1
+	move.w	d2,sr
+	bsr	TBLCLR
+	bsr	DSPCLR
+	sf	SKPFLG-WK(a6)
+	sf	ADIOCS.w
+	moveq	#0,d0
+	rts
+
+T2ENT34:
+	ori.w	#$0700,sr
+	bsr	DMASTP
+	sf	ADIOCS.w
+	moveq	#0,d0
+	rts
+
+T2ENT4:	tst.w	d0
+	bpl	T2ENT9
+	subi.w	#$FFF0,d0
+	bcs	T2ERR1
+	beq	T2ENT5
+	cmpi.w	#1,d0
+	beq	T2ENT51
+	cmpi.w	#$D,d0
+	bcs	T2ERR1
+	beq	T2ENT46
+	cmpi.w	#$F,d0
+	bne	T2ENT47
+	tst.b	KEEPFL-WK(a6)		* $FFFF:常駐解除
+	bne	T2ERR1
+	ori.w	#$0700,sr
+	bsr	T2KILL
+	lea	VECTBL-WK(a6),a0
+	movea.l	a0,a2			* 元のﾍﾞｸﾀと同じか？
+T2ENT42:
+	moveq	#0,d0
+	move.w	(a0)+,d0
+	beq	T2ENT43
+	lsl.l	#2,d0
+	movea.l	d0,a1
+	move.l	(a0)+,d1
+	addq.l	#4,a0
+	cmp.l	(a1),d1
+	beq	T2ENT42
+	moveq	#-2,d0			* 違っていたら解除しない
+	rts
+
+T2ERR1:	moveq	#-1,d0
+	rts
+
+T2ENT43:
+	move.l	#PCM8NG,CHKFLG-WK(a6)	* 認識用ﾌﾗｸﾞを壊す
+	moveq	#-2,d1			* 常駐解除を実行
+T2ENT44:
+	move.w	(a2)+,d0
+	beq	T2ENT45
+	addq.l	#4,a2
+	move.l	(a2),-(sp)
+	move.w	d0,-(sp)
+	DOS	_INTVCS
+	addq.l	#6,sp
+	move.l	d1,(a2)+		* 元のﾍﾞｸﾀ情報無効
+	bra	T2ENT44
+T2ENT45:
+	btst	#0,SYSFLG-WK(a6)
+	bne	T2ENT451
+	pea	TOPADR-$F0(pc)		* ﾒﾓﾘを解放
+	DOS	_MFREE
+	addq.l	#4,sp
+T2ENT451:
+	moveq	#0,d0
+	rts
+
+T2ENT46:				* $FFFD:元のﾍﾞｸﾀ情報を読む
+	lea	VECTBL-WK-8(a6),a2
+T2ENT461:
+	addq.l	#8,a2
+	move.w	(a2)+,d0
+	beq	T2ENT462
+	cmp.w	d0,d1
+	bne	T2ENT461
+	move.l	4(a2),d0
+	rts
+T2ENT462:
+	tst.w	d1
+	bne	T2ERR2
+	move.l	(a2),d0
+	rts
+
+T2KEEP:	lea	WK(pc),a6		* trap #2 のﾍﾞｸﾀを設定
+	lea	T2VECA.w,a2
+	lea	T2ENT-WK(a6),a3
+	cmpa.l	(a2),a3
+	beq	T2KEE2
+	lea	VECTBL-WK(a6),a1
+	moveq	#-1,d0
+T2KEE1:	move.w	(a1)+,d0
+	beq	T2KEE2
+	addq.l	#8,a1
+	cmpi.w	#T2VECT,d0
+	bne	T2KEE1
+	move.l	(a2),-4(a1)
+	move.l	a3,(a2)
+T2KEE2:	rts
+
+T2ENT47:				* $FFFE:常駐
+	ori.w	#$0700,sr
+	lea	VECTBL-WK(a6),a2
+	movea.l	a2,a3
+T2ENT471:
+	moveq	#0,d0
+	move.w	(a2)+,d0
+	beq	T2ENT473
+	cmpi.w	#T2VECT,d0		* trap #2 のﾍﾞｸﾀは無視
+	beq	T2ENT472
+	lsl.l	#2,d0
+	movea.l	d0,a0
+	move.l	(a0),d0
+	cmp.l	(a2),d0
+	addq.l	#8,a2
+	bne	T2ENT471
+T2ERR2:	moveq	#-1,d0
+	rts				* 同じﾍﾞｸﾀがあったらｴﾗｰ
+T2ENT472:
+	addq.l	#8,a2
+	bra	T2ENT471
+T2ENT473:
+	bsr	T2KILL
+	sf	SKPFLG-WK(a6)
+T2ENT474:				* ﾍﾞｸﾀを設定
+	move.w	(a3)+,d0
+	beq	T2ENT475
+	move.l	(a3)+,-(sp)
+	move.w	d0,-(sp)
+	DOS	_INTVCS
+	addq.l	#6,sp
+	addq.l	#4,a3
+	cmp.l	-8(a3),d0		* 同じｱﾄﾞﾚｽは保存しない
+	beq	T2ENT474
+	move.l	d0,-4(a3)
+	bra	T2ENT474
+T2ENT475:
+	move.l	#PCM8OK,CHKFLG-WK(a6)	* 認識用ﾌﾗｸﾞを戻す
+	bsr	T2ACTV
+	moveq	#0,d0
+	rts
+
+T2ENT5:	moveq	#0,d0			* $FFF0:割り込み中ﾌﾗｸﾞﾁｪｯｸ
+	move.b	ENDFLG-WK(a6),d0
+	rts
+
+T2ENT51:				* $FFF1:PCM8A内部初期化
+	ori.w	#$0700,sr
+	bsr	T2ACTV
+	sf	PCMFL2-WK(a6)
+	tst.b	ENDFLG-WK(a6)
+	beq	T2ENT52
+	lea	MFPIMA,a1		* 割り込みﾏｽｸ復帰
+	movep.w	-$C(a1),d0
+	tst.b	DMACH3-MFPIMA(a1)
+	sf	ENDFLG-WK(a6)
+	movep.w	d0,0(a1)
+	bsr	DSPCLR
+T2ENT52:
+	moveq	#0,d0
+	rts
+
+T2ENT8:	ext.w	d0
+	add.w	d0,d0
+	move.w	T2JTB2(pc,d0.w),d0
+	jmp	T2JTB2(pc,d0.w)
+
+T2JTB2:	.dc.w	T2EX7-T2JTB2		* $01F7:周波数ﾓｰﾄﾞ設定
+	.dc.w	T2EX8-T2JTB2		* $01F8:PCM8Aｼｽﾃﾑ情報設定
+	.dc.w	T2EX0-T2JTB2		* $01F9:PCM8Aｼｽﾃﾑ情報
+	.dc.w	T2EX1-T2JTB2		* $01FA:PCM8Aｽﾃｰﾀｽ
+	.dc.w	T2EX2-T2JTB2		* $01FB:MPU･MFP割り込みﾏｽｸ設定
+	.dc.w	T2EX3-T2JTB2		* $01FC:多重･単音ﾓｰﾄﾞの設定
+	.dc.w	T2ERR3-T2JTB2		* $01FD:reserve
+	.dc.w	T2EX4-T2JTB2		* $01FE:占有
+	.dc.w	T2EX5-T2JTB2		* $01FF:占有解除
+
+T2ERR3:	moveq	#-1,d0
+	rts
+
+T2ENT9:	cmpi.w	#$7F00,d0
+	beq	T2EN90
+	cmpi.w	#$7F02,d0
+	beq	T2EN92
+	cmpi.w	#$7F03,d0
+	beq	T2EN93
+	cmpi.w	#$7F04,d0
+	bne	T2ERR3
+	moveq	#0,d0
+	subq.w	#1,d1			* $7F04:音量固定ﾓｰﾄﾞ設定
+	beq	T2EN941
+	bcc	T2EN942
+	bset	#1,SYSFLG-WK(a6)
+	rts
+T2EN941:
+	bclr	#1,SYSFLG-WK(a6)
+	rts
+T2EN942:
+	bchg	#1,SYSFLG-WK(a6)
+	rts
+
+T2EN90:	moveq	#0,d0			* $7F00:動作状態表示ﾓｰﾄﾞ設定
+	subq.w	#1,d1
+	bhi	T2EN901
+	seq	DSPFLG-WK(a6)
+	rts
+T2EN901:
+	not.b	DSPFLG-WK(a6)
+	rts
+
+T2EN92:	moveq	#$4F,d2			* $7F02:多重／単音ﾓｰﾄﾞ設定
+	move.b	SYSFLG-WK(a6),d3
+	and.b	d3,d2
+	moveq	#0,d0
+	subq.w	#1,d1
+	beq	T2EX3X
+	bcc	T2EN922
+	ori.b	#$30,d2
+	bra	T2EX3X
+T2EN922:
+	ori.b	#$10,d2
+	bra	T2EX3X
+
+T2EN93:	cmp.b	#$FE,d1			* $7F03:IOCS使用ﾁｬﾝﾈﾙ数設定
+	bne	T2EN931
+	st	IOCHMX-WK(a6)
+	bra	T2EN932
+T2EN931:
+	cmp.b	PCMCMX+1-WK(a6),d1
+	bhi	T2ERR3
+	move.b	d1,IOCHMX-WK(a6)
+	cmp.b	PCMCHN+1-WK(a6),d1
+	bls	T2EN933
+T2EN932
+	move.b	PCMCHN+1-WK(a6),d1
+T2EN933:
+	move.b	d1,IOCHN-WK(a6)
+	moveq	#0,d0
+	rts
+
+T2EX7:	moveq	#0,d0			* $01F7:周波数ﾓｰﾄﾞ設定
+	move.w	FRQMOD-WK(a6),d0
+	tst.l	d1
+	bmi	T2EX75
+	ror.w	#8,d1
+	cmpi.b	#$FF,d1
+	bne	T2EX71
+	ror.w	#8,d0
+	move.b	d0,d1
+	rol.w	#8,d0
+T2EX71:	rol.w	#8,d1
+	cmpi.b	#$FF,d1
+	bne	T2EX72
+	move.b	d0,d1
+T2EX72:	cmpi.w	#$300,d1
+	bcc	T2EX75
+	cmpi.w	#$100,d1
+	bcc	T2EX73
+	clr.b	d1
+T2EX73:	cmpi.b	#3,d1
+	bcc	T2EX75
+	lea	PCMXTB-WK(a6),a0
+	moveq	#0,d2
+	move.b	d1,d2
+	lsl.w	#5,d2
+	adda.w	d2,a0
+	lea	FRQTBL-WK(a6),a1
+	moveq	#0,d2
+	move.w	d1,d2
+	clr.b	d2
+	lsr.w	#5,d2
+	adda.w	d2,a1
+	move.w	PCMBL0-WK(a6),d0
+	cmpi.b	#1,d1
+	bcs	T2EX74
+	bhi	T2EX76
+	move.w	PCMBN0-WK(a6),d0
+	lsl.w	#3,d0
+T2EX76:	add.w	d0,d0
+T2EX74:	move.w	sr,d2
+	ori.w	#$0700,sr
+	bsr	T2KILL
+	move.w	d1,FRQMOD-WK(a6)
+	move.w	d0,PCMBR0-WK(a6)
+	move.w	d0,PCMBR1-WK(a6)
+	move.w	d0,PCMBR2-WK(a6)
+	movem.l	a0-a1,EXEPTR-WK(a6)
+	move.w	d2,sr
+T2EX75:	rts
+
+T2EX8:	move.b	PCMCHN+1-WK(a6),-(sp)	* $01F8:PCM8Aｼｽﾃﾑ情報設定
+	move.w	(sp),d0
+	move.b	PCMBN0+1-WK(a6),d0
+	swap	d0
+	move.b	VOLMX0+1-WK(a6),(sp)
+	move.w	(sp)+,d0
+	move.b	VOLMN0+1-WK(a6),d0
+	addq.l	#1,d1
+	bcs	T2EX8X
+	subq.l	#1,d1
+	lea	PCMXT4-WK(a6),a0
+T2EX81:	move.w	d1,d2			* 音量最大値
+	lsr.w	#8,d2
+	cmpi.w	#$00FF,d2
+	bcs	T2EX811
+	move.b	VOLMX0+1-WK(a6),d2
+T2EX811:
+	cmpi.b	#16,d2
+	bcc	T2EX812
+	move.b	(a0,d2.w),d2
+T2EX812:
+	cmp.b	VOLMAX+1-WK(a6),d2
+	bls	T2EX82
+	move.b	VOLMAX+1-WK(a6),d2
+T2EX82:	move.w	d1,d3			* 音量最小値
+	andi.w	#$00FF,d3
+	cmpi.w	#$00FF,d3
+	bcs	T2EX821
+	move.b	VOLMN0+1-WK(a6),d3
+T2EX821:
+	cmpi.b	#16,d3
+	bcc	T2EX822
+	move.b	(a0,d3.w),d3
+T2EX822:
+	cmp.b	VOLMIN+1-WK(a6),d3
+	bcc	T2EX823
+	move.b	VOLMIN+1-WK(a6),d3
+T2EX823:
+	cmp.w	d2,d3
+	bcc	T2EX824
+	exg	d2,d3
+T2EX824:
+	movem.w	d2-d3,VOLMN0-WK(a6)
+T2EX83:	swap	d1			* ﾁｬﾝﾈﾙ数最大値
+	move.w	d1,d2
+	lsr.w	#8,d2
+	beq	T2EX830
+	cmpi.w	#$00FF,d2
+	bcs	T2EX831
+T2EX830:
+	move.b	PCMCHN+1-WK(a6),d2
+T2EX831:
+	cmp.b	PCMCMX+1-WK(a6),d2
+	bls	T2EX832
+	move.b	PCMCMX+1-WK(a6),d2
+T2EX832:
+	move.b	IOCHMX-WK(a6),d3
+	cmp.b	d2,d3
+	bls	T2EX833
+	move.b	d2,d3
+T2EX833:
+	move.b	d3,IOCHN-WK(a6)
+	move.b	PCMCHN+1-WK(a6),d3
+	sub.b	d2,d3
+	bcc	T2EX835
+	neg.b	d3			* ﾁｬﾝﾈﾙ数増加時,未使用ﾁｬﾝﾈﾙ停止
+	movea.l	CHNWK-WK(a6),a0
+	move.w	d2,d4
+	sub.b	d3,d4
+	lsl.w	#5,d4
+	lea	(a0,d4.w),a0
+	moveq	#$80,d4
+	dbra	d3,T2EX834
+	bra	T2EX835
+T2EX834:
+	or.b	d4,(a0)
+	lea	$20(a0),a0
+	dbra	d3,T2EX834
+T2EX835:
+	move.w	d2,PCMCHN-WK(a6)
+T2EX84:	andi.w	#$00FF,d1		* 処理ﾊﾞｲﾄ数/12
+	beq	T2EX840
+	cmpi.w	#$00FF,d1
+	bcs	T2EX841
+T2EX840:
+	move.b	PCMBN0+1-WK(a6),d1
+T2EX841:
+	cmp.b	PCMBNX+1-WK(a6),d1
+	bls	T2EX842
+	move.b	PCMBNX+1-WK(a6),d1
+T2EX842:				* 処理ﾊﾞｲﾄ数変更開始
+	move.w	d1,d2
+	move.w	d1,d5
+	add.w	d1,d1
+	add.w	d5,d1
+	lsl.w	#2,d2
+	move.w	d1,d3
+	lsl.w	#4,d3
+	move.w	d2,d4
+	lsl.w	#4,d4
+	move.w	d1,d6
+	add.w	d6,d6
+	add.w	d6,d6
+	lea	BYTTB1-WK(a6),a2
+	lea	BYTTB2-WK(a6),a3
+	movem.l	BYTPT0-WK(a6),a0-a1
+	cmpa.l	a0,a1
+	bne	T2EX851
+	movea.l	a2,a0
+	cmpa.l	a1,a2
+	bne	T2EX851
+	movea.l	a3,a0
+T2EX851:
+	tas	PCMFL2-WK(a6)
+	bmi	T2EX8X
+	move.w	d1,2(a0)		* 1/4
+	move.w	d2,10(a0)		* 1/3
+	add.w	d1,d1
+	move.w	d1,18(a0)		* 1/2
+	add.w	d2,d2
+	move.w	d2,26(a0)		* 2/3
+	add.w	d1,d1
+	move.w	d1,34(a0)		* 1
+	move.w	d3,42(a0)		* 4
+	add.w	d1,d1
+	move.w	d1,50(a0)		* 2
+	add.w	d2,d2
+	move.w	d2,58(a0)		* 4/3
+	move.w	d4,66(a0)		* 16/3
+	move.w	d2,d4
+	add.w	d2,d2
+	move.w	d2,74(a0)		* 8/3
+	move.w	d1,82(a0)		* 2
+	add.w	d3,d3
+	move.w	d3,90(a0)		* 8
+	add.w	d1,d1
+	move.w	d1,98(a0)		* 4
+	move.w	sr,d7
+	ori.w	#$0700,sr
+	move.l	a0,BYTPT0-WK(a6)
+	move.w	d5,PCMBN0-WK(a6)
+	move.w	d6,PCMBL0-WK(a6)
+	move.b	FRQSEL-WK(a6),d0
+	beq	T2EX852
+	add.w	d6,d6
+	subq.b	#1,d0
+	bhi	T2EX852
+	move.w	d4,d6
+T2EX852:
+	move.w	d6,PCMBR0-WK(a6)
+	move.w	#$2000,PCMFLG-WK(a6)
+	move.w	d7,sr
+	sf	PCMFL2-WK(a6)
+T2EX8X:	rts
+
+T2EX0:	move.w	PCMBL0-WK(a6),d0	* $01F9:PCM8Aｼｽﾃﾑ情報
+	swap	d0
+	move.b	VOLMX0+1-WK(a6),-(sp)
+	move.w	(sp)+,d0
+	move.b	VOLMN0+1-WK(a6),d0
+	rts
+
+T2EX1:	moveq	#0,d0			* $01FA:PCM8Aｽﾃｰﾀｽ
+	move.b	PCMCHN+1-WK(a6),-(sp)
+	move.w	(sp)+,d0
+	move.b	ACTFLG-WK(a6),d0	* 動作中のﾁｬﾝﾈﾙ数
+	swap	d0
+	move.b	SYSFLG-WK(a6),d0	* ﾃﾞﾊﾞｲｽﾄﾞﾗｲﾊﾞ組み込み/音量固定ﾓｰﾄﾞﾌﾗｸﾞ
+	andi.b	#7,d0
+	eori.b	#6,d0
+	tst.b	DSPFLG-WK(a6)		* 動作表示ﾓｰﾄﾞ
+	bpl	T2EX10
+	bset	#3,d0
+T2EX10:	move.b	d0,-(sp)
+	move.w	(sp)+,d0
+	move.b	IOCHN-WK(a6),d0		* IOCS使用ﾁｬﾝﾈﾙ数
+	swap	d0
+	tst.l	d1
+	bmi	T2EX16
+	swap	d1
+	cmpi.b	#$FE,d1
+	bne	T2EX11
+	st	IOCHMX-WK(a6)
+	bra	T2EX12
+T2EX11:	cmp.b	PCMCMX+1-WK(a6),d1	* IOCS使用ﾁｬﾝﾈﾙ数設定
+	bhi	T2EX14
+	move.b	d1,IOCHMX-WK(a6)
+	cmp.b	PCMCHN+1-WK(a6),d1
+	bls	T2EX13
+T2EX12:	move.b	PCMCHN+1-WK(a6),d1
+T2EX13:	move.b	d1,IOCHN-WK(a6)
+T2EX14:	btst	#11,d1
+	beq	T2EX15
+	not.b	DSPFLG-WK(a6)		* 動作表示ﾓｰﾄﾞ反転
+T2EX15:	btst	#10,d1
+	beq	T2EX16
+	bchg	#2,SYSFLG-WK(a6)	* 音量固定ﾓｰﾄﾞ反転
+T2EX16:	rts
+
+T2EX2:	move.l	INTWK-WK(a6),d0		* $01FB:MPU･MFP割り込み設定
+	swap	d0
+	andi.w	#$0700,d0
+	ror.w	#8,d0
+	swap	d0
+	tst.l	d1
+	bmi	T2EX22
+	moveq	#$F8,d3
+	moveq	#5,d2
+	swap	d1
+	andi.b	#7,d1
+	cmp.b	d1,d2
+	bcc	T2EX21
+	move.b	d1,d2
+T2EX21:	or.w	d3,d1
+	rol.w	#8,d1
+	swap	d1
+	or.w	d3,d2
+	rol.w	#8,d2
+	ori.w	#$0700,sr
+	move.l	d1,INTWK-WK(a6)
+	move.w	d2,INTWK2-WK(a6)
+T2EX22:	rts
+
+T2EX3:	move.b	SYSFLG-WK(a6),d2	* $01FC:多重･単音ﾓｰﾄﾞの設定
+	move.b	d2,d3
+	moveq	#0,d0
+	tst.b	d2
+	bmi	T2EX31
+	lsr.b	#4,d2
+	andi.w	#7,d2
+	move.b	T2EX3T(pc,d2.w),d0
+T2EX31:	tst.w	d1
+	bmi	T2EX34
+	moveq	#$2F,d2
+	and.b	SYSFLG-WK(a6),d2
+	tst.w	d1
+	beq	T2EX32
+	cmpi.w	#2,d1
+	bhi	T2ERR4
+	bne	T2EX3X
+	ori.b	#$10,d2
+	bra	T2EX3X
+T2EX32:	ori.b	#$50,d2
+T2EX3X:	cmpi.b	#$20,d2
+	bcs	T2EX33
+	ori.b	#$90,d2
+T2EX33:	move.b	d2,SYSFLG-WK(a6)
+	eor.b	d2,d3
+	bpl	T2EX34
+	bsr	T2ACT0
+T2EX34:	rts
+
+T2ERR4:	moveq	#-1,d0
+	rts
+
+T2EX3T:	.dc.b	1,2,0,0,0,0,0,0
+
+T2EX4:	tst.b	KEEPFL-WK(a6)		* $01FE:占有
+	bmi	T2ERR4
+	st	KEEPFL-WK(a6)
+	moveq	#0,d0
+	rts
+
+T2EX5:	tst.b	KEEPFL-WK(a6)		* $01FF:占有解除
+	bpl	T2ERR4
+	sf	KEEPFL-WK(a6)
+	moveq	#0,d0
+	rts
+
+*--------------------------------------------------------------------
+*	ここからはｻﾌﾞﾙｰﾁﾝ群
+
+T2ACTV:	move.w	sr,-(sp)		* DMAC/ADPCMを動作状態にする
+	ori.w	#$0700,sr
+	movem.l	d0-d1/a0/a5-a6,-(sp)
+	bsr	DMASTP
+	bsr	T2WCLR
+	moveq	#4,d0
+	add.b	FRQSEL-WK(a6),d0
+	bsr	FRQSET
+	moveq	#3,d1
+	bsr	PANSET
+	bsr	PANCNG
+	movea.l	ADPBFX-WK(a6),a0
+	moveq	#PCMBGN,d1
+	bsr	DMASTA
+T2ACT1:	movem.l	(sp)+,d0-d1/a0/a5-a6
+	move.w	(sp)+,sr
+	rts
+
+T2ACT0:	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	movem.l	d0-d1/a0/a5-a6,-(sp)
+	lea	DMACH3,a5
+	bsr	DMASP1
+	bsr	T2WCLR
+	moveq	#4,d0
+	add.b	FRQSEL-WK(a6),d0
+	bsr	FRQSET
+	moveq	#3,d1
+	bsr	PANSET
+	bsr	PANCNG
+	movea.l	ADPBFX-WK(a6),a0
+	moveq	#PCMBGN,d1
+	bsr	DMASA1
+	bra	T2ACT1
+
+T2KILL:	move.w	sr,-(sp)		* 全ﾁｬﾝﾈﾙ強制停止&初期化
+	ori.w	#$0700,sr
+	movem.l	d0-d7/a0-a1/a5,-(sp)
+	moveq	#0,d1
+	move.w	d1,ADIOCS.w
+	bsr	PANSET
+	bsr	PANCNG
+	bsr	DMASTP
+T2KIL1:	bsr	T2WCLR
+	bsr	DSPCLR
+	movem.l	(sp)+,d0-d7/a0-a1/a5
+	move.w	(sp)+,sr
+	rts
+
+T2KIL0:	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	movem.l	d0-d7/a0-a1/a5,-(sp)
+	lea	DMACH3,a5
+	bsr	DMASP1
+	bra	T2KIL1
+
+DSPCLR:	tst.b	DSPFLG-WK(a6)
+	bpl	DSPCL1
+	move.w	#DCOL0,TXTPL0		* 動作状態表示OFF
+DSPCL1:	rts
+
+DMASTA:	lea	DMACH3,a5		* DMA転送開始
+	lea	WK(pc),a6
+DMASA0:	move.b	#$01,PCMCNT
+DMASA1:	move.b	#$10,7(a5)
+	st.b	(a5)
+	move.b	#PCMSP2,PCMDAT
+	move.l	#PCMDAT,$14(a5)
+	move.l	a0,$C(a5)
+	move.w	d1,$A(a5)
+	move.l	#$32888004,d0
+	movep.w	d0,4(a5)
+	swap	d0
+	movep.w	d0,5(a5)
+	move.b	#$02,PCMCNT
+	tas	(a6)
+	rts
+
+DMASTP:	lea	DMACH3,a5		* DMA停止
+	lea	WK(pc),a6
+DMASP0:	move.b	#$01,PCMCNT		* ADPCM停止
+DMASP1:	move.b	#$10,7(a5)		* DMAC強制停止
+	st.b	(a5)
+	move.b	#PCMSP2,PCMDAT
+	sf	ACTFLG-WK(a6)
+	tas	(a6)
+	rts
+
+T2WCLR:	movem.l	d0-d7/a0,-(sp)		* 全ﾁｬﾝﾈﾙ初期化
+	move.w	PCMCMX-WK(a6),d6
+	move.w	d6,d0
+	lsl.w	#5,d0
+	movea.w	d0,a0
+	adda.l	CHNWK-WK(a6),a0
+	move.l	#$80080403,d0
+	move.l	TBLAD1-WK(a6),d1
+	moveq	#0,d2
+	moveq	#0,d3
+	moveq	#0,d4
+	move.l	#P16X0,d5
+	subq.w	#1,d6
+	moveq	#0,d7
+T2WCL1:	movem.l	d0-d7,-(a0)
+	dbra	d6,T2WCL1
+	move.l	d2,M1LEN-WK(a6)
+	move.b	d2,ACTFLG-WK(a6)
+	sf	(a6)
+	movem.l	(sp)+,d0-d7/a0
+	rts
+
+TBLCLR:	movem.l	d0/a0,-(sp)		* 全ﾁｬﾝﾈﾙ停止
+	movea.l	CHNWK-WK(a6),a0
+	moveq	#-1,d0
+	add.w	PCMCMX-WK(a6),d0
+TBLCL1:	tas	(a0)
+	lea	$20(a0),a0
+	dbra	d0,TBLCL1
+	sf	ACTFLG-WK(a6)
+	sf	(a6)
+	movem.l	(sp)+,d0/a0
+	rts
+
+TBLCHK:	tst.b	SYSFLG-WK(a6)		* $008x:ﾃﾞｰﾀ長問い合せ
+	bmi	TBLCH3
+	move.b	(a5),d0
+	bmi	TBLCH1
+	andi.w	#3,d0
+	bne	TBLCH2
+	move.l	$C(a5),d0
+	rts
+
+TBLCH2:	neg.w	d0
+	ext.l	d0
+	rts
+
+TBLCH3:	btst	#0,(a6)
+	beq	TBLCH1
+	moveq	#-3,d0
+	rts
+
+T2EXE1:	cmpi.w	#2*4,d0			* 出力処理
+	bcc	T2EXE15
+	tst.l	d2
+	bmi	TBLCHK
+T2EXE15:
+	lsl.w	#6,d0
+	swap	d1
+	andi.w	#$00FF,d1
+	or.w	d0,d1
+	swap	d1
+T2EXE10:				* 出力開始(IOCSのｴﾝﾄﾘﾎﾟｲﾝﾄ)
+	tst.b	SYSFLG-WK(a6)
+	bmi	T2EXEM
+	move.b	ADIOCS.w,d0
+	beq	T2EXE11
+	cmpi.b	#PCM8FL,d0
+	beq	T2EXE11
+	moveq	#0,d0
+	rts
+T2EXE11:
+	moveq	#4,d0
+	add.b	FRQSEL-WK(a6),d0
+	bsr	FRQSET
+	tst.b	SKPFLG-WK(a6)
+	bne	T2EXE13
+	bclr	#1,(a6)
+	beq	T2EXE14
+T2EXE13:
+	bsr	TBLCLR
+	sf	SKPFLG-WK(a6)
+T2EXE14:
+	bsr	TBLSET
+T2EXE1X:				* 一時停止解除時のｴﾝﾄﾘﾎﾟｲﾝﾄ
+	movem.l	d1/a0/a5,-(sp)
+	movea.l	CHNWK-WK(a6),a0
+	moveq	#-1,d1
+	add.w	PCMCHN-WK(a6),d1
+	moveq	#$80,d0
+T2EXE1A:
+	and.b	(a0),d0
+	lea	$20(a0),a0
+	dbeq	d1,T2EXE1A
+	bne	T2EXE1D
+	lea	DMACH3,a5
+	movea.l	ADPBFX-WK(a6),a0
+	move.w	sr,d1
+	ori.w	#$0500,sr
+	bset	#3,(a6)
+	tst.b	ENDFLG-WK(a6)
+	bne	T2EXE1C
+	move.w	#PCM8FL*$100,ADIOCS.w
+	move.l	#$32C88004,d0
+	ori.w	#$0700,sr
+	btst	#3,(a5)
+	bne	T2EXE1C
+	move.b	#$10,7(a5)
+	st	(a5)
+	move.l	a0,$C(a5)
+	move.w	#PCMBGN,$A(a5)
+	move.l	a0,$1C(a5)
+	move.w	PCMBR2-WK(a6),$1A(a5)
+	movep.w	d0,4(a5)
+	swap	d0
+	movep.w	d0,5(a5)
+	move.b	#$02,PCMCNT
+	tas	(a6)
+T2EXE1C:
+	move.w	d1,sr
+T2EXE1D:
+	movem.l	(sp)+,d1/a0/a5
+T2EXE1E:
+	moveq	#0,d0
+	rts
+
+T2EXEM:	move.b	ADIOCS.w,d0		* 単音再生ﾓｰﾄﾞ
+	beq	T2EXM0
+	cmpi.b	#PCM8FL,d0
+	bne	T2EXE1E
+T2EXM0:	lea	DMACH3,a5
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	sf	M1MOD-WK(a6)
+	clr.l	M1LEN-WK(a6)
+	move.b	#PCM8FL,ADIOCS.w
+	sf	ACTFLG-WK(a6)
+	bclr	#0,(a6)
+	move.b	#$10,7(a5)		* DMAC停止
+	st	(a5)
+	move.b	#PCMSP2,PCMDAT
+	move.w	(sp),sr
+	cmpi.l	#$02000000,d1
+	bcc	T2EXM1
+	tst.l	d2
+	beq	T2EXM9
+T2EXM1:	move.w	d1,d0			* 周波数設定
+	move.w	d0,-(sp)
+	move.b	(sp)+,d0
+	cmpi.b	#11,d0
+	bcc	T2EXM9
+	ext.w	d0
+	move.b	MODTBL-WK(a6,d0.w),d0
+	bmi	T2EXM9
+	bsr	FRQSET
+	tst.b	d1
+	beq	T2EXM9
+	cmpi.b	#4,d1
+	bcs	T2EXM2
+	move.b	PANWK-WK(a6),d1
+T2EXM2:	bsr	PANSET			* 定位設定
+	bsr	PANCNG
+	movea.l	ADPBFX-WK(a6),a0
+	ori.w	#$0700,sr
+	move.b	#$10,7(a5)
+	st	(a5)
+	move.l	a0,$C(a5)
+	move.w	PCMBL0-WK(a6),$A(a5)
+	move.l	#$32888004,d0
+	movep.w	d0,4(a5)
+	swap	d0
+	movep.w	d0,5(a5)
+	move.b	#$02,PCMCNT
+	bset	#0,(a6)
+	move.w	(sp),sr
+	move.l	d1,d0
+	rol.l	#8,d0
+	andi.b	#3,d0
+	ori.w	#$0700,sr
+	move.b	d0,M1MOD-WK(a6)
+	subq.b	#1,d0
+	beq	T2EXMA
+	bcc	T2EXM8
+	move.l	#$FFF0,d3		* 通常ﾓｰﾄﾞ
+	cmp.l	d3,d2
+	bcc	T2EXM5
+	move.l	d2,d3
+T2EXM5:	move.w	d3,$1A(a5)
+	move.l	a1,$1C(a5)
+	sub.l	d3,d2
+	adda.l	d3,a1
+	move.b	#$48,7(a5)
+T2EXM8:	move.l	d2,M1LEN-WK(a6)		* 割り込みﾙｰﾁﾝで使用する情報をｾｯﾄ
+	move.l	a1,M1ADR-WK(a6)
+T2EXM9:	move.w	(sp)+,sr
+	moveq	#0,d0
+	rts
+
+T2EXMA:	moveq	#0,d3			* ｱﾚｲﾁｪｰﾝﾓｰﾄﾞ(ﾃｰﾌﾞﾙの数は65535まで)
+	not.w	d3
+	cmp.l	d3,d2
+	bls	T2EXM8
+	move.l	d3,d2
+	bra	T2EXM8
+
+T2STOP:	tas	(a5)			* $00Bx:ﾁｬﾝﾈﾙ一時停止
+TBLCH1:	moveq	#0,d0
+	rts
+
+T2CONT:	move.w	sr,-(sp)		* $00Cx:ﾁｬﾝﾈﾙ一時停止解除
+	ori.w	#$0700,sr
+	andi.b	#$7F,(a5)
+	ori.b	#$40,(a5)
+	move.w	(sp)+,sr
+	bra	T2EXE1X
+
+TBLMOD:	move.l	(a5),d0			* $009x:動作ﾓｰﾄﾞ問い合せ
+	andi.l	#$00FFFFFF,d0
+	rts
+
+TBLADR:	btst	#2,ADIOCS.w		* $00Ax:ｱｸｾｽｱﾄﾞﾚｽ問い合せ
+	bne	TBLADR1
+	tst.b	SYSFLG-WK(a6)
+	bmi	TBLADR1
+	move.l	$10(a5),d0
+	rts
+
+TBLADR1:				* 単音再生ﾓｰﾄﾞ/録音中
+	lea	DMACH3+$C,a0
+	moveq	#2,d2			* 繰り返しは3回まで
+	move.w	sr,d3
+TBLADR2:
+	ori.w	#$0700,sr
+	move.l	(a0),d1
+	move.l	(a0),d0
+	move.w	d3,sr
+	sub.l	d0,d1
+	bcc	TBLADR3
+	neg.l	d1
+TBLADR3:
+	cmpi.l	#$8000,d1
+	dbcs	d2,TBLADR2
+	rts
+
+TBLCNG:	movem.l	d0-d3/a0,-(sp)		* $007x:動作ﾓｰﾄﾞ変更
+	andi.l	#$00FFFFFF,d1
+	tst.b	d1			* 定位
+	beq	TBLC02
+	cmpi.b	#4,d1
+	bcs	TBLC01
+	move.b	3(a5),d1
+TBLC01:	bsr	PANSET
+	bra	TBLC03
+TBLC02:	bset	#31,d1
+	move.b	3(a5),d1
+TBLC03:	ror.w	#8,d1
+	cmpi.b	#13,d1			* 周波数
+	bcs	TBLC11
+	move.b	2(a5),d1
+TBLC11:	swap	d1
+	moveq	#0,d3
+	movem.w	VOLMN0-WK(a6),d0/d2
+	move.b	d1,d3			* 音量
+	cmpi.b	#15,d3
+	bhi	TBLC12
+	move.b	PCMXT4-WK(a6,d3.w),d3
+TBLC12:	cmp.b	d0,d3
+	bcs	TBLC21
+	cmp.b	d2,d3
+	bls	TBLC24
+TBLC21:	move.b	1(a5),d1
+	move.b	d1,d3
+	cmpi.b	#15,d3
+	bhi	TBLC22
+	move.b	PCMXT4-WK(a6,d3.w),d3
+TBLC22:	cmp.b	d0,d3
+	bcc	TBLC23
+	move.b	d0,d3
+	move.b	d0,d1
+	bra	TBLC24
+TBLC23:	cmp.b	d2,d3
+	bls	TBLC24
+	move.b	d2,d3
+	move.b	d2,d1
+TBLC24:	swap	d1
+	moveq	#0,d2
+	move.b	d1,d2
+	move.b	MODTBL-WK(a6,d2.w),d0
+	move.b	2(a5),d2
+	move.b	MODTBL-WK(a6,d2.w),d2
+	eor.b	d0,d2
+	andi.w	#$F0,d2
+	bne	TBLCER
+	bclr	#7,d0			* 周波数によって分岐
+	bne	TBLC41
+	bclr	#6,d0
+	bne	TBLCER
+	movea.l	EXEPTR-WK(a6),a0	* ADPCM
+	andi.w	#$7,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	rol.w	#8,d1
+	movea.l	(a0,d0.w),a0		* 処理ｱﾄﾞﾚｽ
+	move.b	#VOLOFS,d2
+	moveq	#6,d0			* 音量固定ﾁｪｯｸ
+	and.b	SYSFLG-WK(a6),d0
+	bne	TBLC31
+	move.b	d3,d2
+TBLC31:	sub.w	VOLMIN-WK(a6),d2
+	addi.w	#VOLWID+1,d2
+	swap	d2
+	lsr.l	#6,d2
+	bra	TBLC51
+
+TBLC41:	bclr	#6,d0			* PCM
+	bne	TBLC42
+	lea	PCMXT2(pc),a0		* 16ﾋﾞｯﾄPCM
+	bra	TBLC43
+
+TBLC42:	lea	PCMXT3(pc),a0		* 8ﾋﾞｯﾄPCM
+TBLC43:	rol.w	#8,d1
+	move.b	#VOLOFS,d2
+	moveq	#6,d0			* 音量固定ﾁｪｯｸ
+	and.b	SYSFLG-WK(a6),d0
+	bne	TBLC44
+	move.b	d3,d2			* 処理ｱﾄﾞﾚｽ
+TBLC44:	subi.b	#VOLMN2,d2
+	add.w	d2,d2
+	add.w	d2,d2
+	movea.l	(a0,d2.w),a0
+
+TBLC51:	move.l	#$FF000000,d0
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	and.l	(a5),d0
+	or.l	d0,d1
+	move.l	d1,(a5)			* ﾌﾗｸﾞ変更
+	move.l	d2,8(a5)		* 音量変換用ｵﾌｾｯﾄ変更
+	move.l	a0,$14(a5)		* 処理ﾙｰﾁﾝｱﾄﾞﾚｽ変更
+	move.w	(sp)+,sr
+	move.b	SYSFLG-WK(a6),d0
+	bpl	TBLCNE
+	bsr	PANCNG			* 単音再生ﾓｰﾄﾞ時の処理
+	move.w	d1,-(sp)
+	move.b	(sp)+,d0
+	ext.w	d0
+	move.b	MODTBL-WK(a6,d0.w),d0
+	bmi	TBLCNE
+	bsr	FRQSET
+TBLCNE:	movem.l	(sp)+,d0-d3/a0
+	rts
+
+TBLCER:	tas	(a5)
+	bra	TBLCNE
+
+TBLSET:	movem.l	d0-d5/a0-a2,-(sp)	* ﾁｬﾝﾈﾙ動作設定
+	btst	#25,d1
+	bne	TBLS00
+	tst.l	d2
+	beq	TBLS5X
+TBLS00:	tst.b	d1			* 定位
+	beq	TBLS02
+	cmpi.b	#4,d1
+	bcs	TBLS01
+	move.b	3(a5),d1
+TBLS01:	bsr	PANSET
+	bra	TBLS03
+TBLS02:	bset	#31,d1
+	move.b	3(a5),d1
+TBLS03:	ror.w	#8,d1
+	cmpi.b	#13,d1			* 周波数
+	bcs	TBLS11
+	move.b	2(a5),d1
+TBLS11:	swap	d1
+	moveq	#0,d5
+	movem.w	VOLMN0-WK(a6),d3-d4
+	move.b	d1,d5			* 音量
+	cmpi.b	#15,d5
+	bhi	TBLS12
+	move.b	PCMXT4-WK(a6,d5.w),d5
+TBLS12:	cmp.b	d3,d5
+	bcs	TBLS21
+	cmp.b	d4,d5
+	bls	TBLS24
+TBLS21:	move.b	1(a5),d1
+	move.b	d1,d5
+	cmpi.b	#15,d5
+	bhi	TBLS22
+	move.b	PCMXT4-WK(a6,d5.w),d5
+TBLS22:	cmp.b	d3,d5
+	bcc	TBLS23
+	move.b	d3,d1
+	move.b	d3,d5
+	bra	TBLS24
+TBLS23:	cmp.b	d4,d5
+	bls	TBLS24
+	move.b	d4,d1
+	move.b	d4,d5
+TBLS24:	ori.w	#$4000,d1		* 初期化ﾌﾗｸﾞｾｯﾄ
+	swap	d1
+	moveq	#0,d0
+	move.b	d1,d0
+	move.b	MODTBL-WK(a6,d0.w),d0
+	bmi	TBLS41
+
+	movea.l	EXEPTR-WK(a6),a0	* ADPCM
+	add.w	d0,d0
+	add.w	d0,d0
+	rol.w	#8,d1
+	swap	d1
+	movea.l	(a0,d0.w),a2		* 処理ｱﾄﾞﾚｽ
+	move.l	TBLAD1-WK(a6),d3	* 倍率ﾃｰﾌﾞﾙｱﾄﾞﾚｽ
+	moveq	#0,d4
+	move.b	#VOLOFS,d4
+	moveq	#6,d0			* 音量固定ﾁｪｯｸ
+	and.b	SYSFLG-WK(a6),d0
+	bne	TBLS31
+	move.b	d5,d4
+TBLS31:	sub.b	VOLMIN+1-WK(a6),d4
+	addi.w	#VOLWID+1,d4
+	swap	d4
+	lsr.l	#6,d4
+	bra	TBLS51
+
+TBLS41:	bchg	#6,d0
+	bne	TBLS42			* PCM
+	lea	PCMXT2(pc),a0		* 16ﾋﾞｯﾄPCM
+	rol.w	#8,d1
+	swap	d1
+	move.w	d1,d0
+	andi.w	#$0300,d0
+	bne	TBLS46
+	btst	#0,d2
+	bne	TBLS45
+TBLS46:	move.l	a1,d0
+	andi.w	#1,d0
+	beq	TBLS43
+TBLS45:	ori.w	#$8000,d1
+	bra	TBLS43
+
+TBLS42:	bchg	#5,d0
+	bne	TBLS5X
+	lea	PCMXT3(pc),a0		* 8ﾋﾞｯﾄPCM
+	rol.w	#8,d1
+	swap	d1
+TBLS43:	moveq	#0,d4
+	move.b	#VOLOFS,d4
+	moveq	#6,d3			* 音量固定ﾁｪｯｸ
+	and.b	SYSFLG-WK(a6),d3
+	bne	TBLS44
+	move.b	d5,d4
+TBLS44:	subi.b	#VOLMN2,d4
+	add.w	d4,d4
+	add.w	d4,d4
+	movea.l	(a0,d4.w),a2		* 処理ｱﾄﾞﾚｽ
+
+TBLS51:	move.w	d1,d0
+	andi.w	#$0300,d0
+	cmpi.w	#$0100,d0
+	bcc	TBLS52
+	swap	d1
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	movem.l	d1/d3-d4,(a5)		* 通常出力
+	movem.l	d2/a1-a2,$C(a5)
+TBLSEE:	move.w	(sp)+,sr
+TBLSE1:	movem.l	(sp)+,d0-d5/a0-a2
+	rts
+
+TBLS5X:	tas	(a5)			* ﾁｬﾝﾈﾙ停止
+	bra	TBLSE1
+
+TBLS52:	bne	TBLS53
+	subq.l	#1,d2			* ｱﾚｲﾁｪｰﾝ出力
+	bmi	TBLS5X
+	move.l	a1,d0
+	andi.w	#1,d0
+	bne	TBLS521
+	swap	d1
+	moveq	#0,d0
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	movem.l	d1/d3-d4,(a5)
+	move.l	(a1)+,d4
+	move.w	(a1)+,d0
+	movem.l	d0/d4/a2,$C(a5)
+	movem.l	d2/a1,$18(a5)
+	bne	TBLSEE
+	tas	(a5)
+	bra	TBLSEE
+
+TBLS521:
+	ori.w	#$8000,d1
+	swap	d1
+	moveq	#0,d0
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	movem.l	d1/d3-d4,(a5)
+	moveq	#0,d4
+	movem.l	d0/d4/a2,$C(a5)
+	movem.l	d2/a1,$18(a5)
+	bra	TBLSEE
+
+TBLS53:	move.l	a1,d0			* ﾘﾝｸｱﾚｲﾁｪｰﾝ出力
+	andi.w	#1,d0
+	bne	TBLS521
+	swap	d1
+	moveq	#0,d0
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	movem.l	d1/d3-d4,(a5)
+	move.l	(a1)+,d4
+	move.w	(a1)+,d0
+	movem.l	d0/d4/a2,$C(a5)
+	move.l	a1,$1C(a5)
+	tst.w	d0
+	bne	TBLSEE
+	tas	(a5)
+	bra	TBLSEE
+
+PANSET:	movem.l	d0-d1,-(sp)		* 定位設定
+	andi.b	#3,d1
+	cmp.b	PANWK-WK(a6),d1
+	beq	PANSE3
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	move.b	d1,PANWK-WK(a6)
+	not.b	d1
+	moveq	#1,d0
+	lsr.b	#1,d1
+	addx.b	d0,d0
+	move.b	d0,PANWK1-WK(a6)
+	moveq	#0,d0
+	lsr.b	#1,d1
+	addx.b	d0,d0
+	move.b	d0,PANWK1+1-WK(a6)
+	bset	#4,PANFLG-WK(a6)
+	move.w	(sp)+,sr
+PANSE3:	movem.l	(sp)+,d0-d1
+	rts
+
+PANCNG:	move.w	sr,-(sp)		* 定位変更
+	ori.w	#$0700,sr
+	move.b	PANWK1-WK(a6),PPICTL
+	move.b	PANWK1+1-WK(a6),PPICTL
+	sf	PANFLG-WK(a6)
+	move.w	(sp)+,sr
+	rts
+
+FRQSE0:	movem.l	d0-d2/a0,-(sp)		* 周波数ﾓｰﾄﾞ自動判別時ｴﾝﾄﾘ
+	bra	FRQSE1
+
+FRQSET:	movem.l	d0-d2/a0,-(sp)		* 再生周波数設定
+	cmpi.b	#7,d0
+	bcc	FRQSEE
+	movea.l	FRQPTR-WK(a6),a0
+	move.b	(a0,d0.w),d0
+	btst	#6,d0
+	bne	FRQSEE
+FRQSE1:	moveq	#$0C,d1
+	move.w	sr,-(sp)
+	ori.w	#$0700,sr
+	and.b	PPIPC,d1
+	lsr.b	#2,d1
+	move.b	FM1BBF.w,d2
+	bpl	FRQSE2
+	tas	d1
+FRQSE2:	eor.b	d0,d1
+	beq	FRQSE6
+	bpl	FRQSE5
+FRQSE3:	tst.b	FMDAT
+	bmi	FRQSE3
+	move.b	#$1B,FMADR
+	andi.b	#$7F,d2
+	tst.b	d0
+	bpl	FRQSE4
+	tas	d2
+FRQSE4:	tst.b	FMDAT
+	bmi	FRQSE4
+	move.b	d2,FMDAT
+	move.b	d2,FM1BBF.w
+FRQSE5:	andi.b	#3,d1
+	beq	FRQSE6
+	moveq	#2,d1
+	lsr.b	#1,d0
+	addx.b	d1,d1
+	move.b	d1,PPICTL
+	moveq	#3,d1
+	lsr.b	#1,d0
+	addx.b	d1,d1
+	move.b	d1,PPICTL
+FRQSE6:	move.w	(sp)+,sr
+FRQSEE:	movem.l	(sp)+,d0-d2/a0
+	rts
+
+*	.dc.w	0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
+
+*	処理ﾊﾞｲﾄ数ﾃｰﾌﾞﾙ
+BYTTB1:	.dc.l	28*$10000+PCMBI1/4	,0
+	.dc.l	28*$10000+PCMBI1/3	,0
+	.dc.l	28*$10000+PCMBI1/2	,0
+	.dc.l	28*$10000+PCMBI1*2/3	,0
+	.dc.l	28*$10000+PCMBI1	,0
+	.dc.l	29*$10000+PCMBI1*4	,0
+	.dc.l	29*$10000+PCMBI1*2	,0
+	.dc.l	28*$10000+PCMBI1*4/3	,0
+	.dc.l	30*$10000+PCMBI1*16/3	,0
+	.dc.l	30*$10000+PCMBI1*8/3	,0
+	.dc.l	28*$10000+PCMBI1*2	,0
+	.dc.l	31*$10000+PCMBI1*8	,0
+	.dc.l	31*$10000+PCMBI1*4	,0
+	.dc.l	-1			,0
+	.dc.l	-1			,0
+	.dc.l	-1			,0
+
+BYTTB2:	.dc.l	28*$10000+PCMBI1/4	,0
+	.dc.l	28*$10000+PCMBI1/3	,0
+	.dc.l	28*$10000+PCMBI1/2	,0
+	.dc.l	28*$10000+PCMBI1*2/3	,0
+	.dc.l	28*$10000+PCMBI1	,0
+	.dc.l	29*$10000+PCMBI1*4	,0
+	.dc.l	29*$10000+PCMBI1*2	,0
+	.dc.l	28*$10000+PCMBI1*4/3	,0
+	.dc.l	30*$10000+PCMBI1*16/3	,0
+	.dc.l	30*$10000+PCMBI1*8/3	,0
+	.dc.l	28*$10000+PCMBI1*2	,0
+	.dc.l	31*$10000+PCMBI1*8	,0
+	.dc.l	31*$10000+PCMBI1*4	,0
+	.dc.l	-1			,0
+	.dc.l	-1			,0
+	.dc.l	-1			,0
+
+*	処理ｱﾄﾞﾚｽﾃｰﾌﾞﾙ(ADPCM,PCM合成)
+PCMXTB:	.dc.l	ADM40,ADM30,ADM20,ADM10,ADM00,ADM70,ADM80,PCMC30	* 15.6KHz
+	.dc.l	ADMC0,ADM40,ADMB0,ADM20,ADMA0,ADM00,ADMD0,PCMC40	* 20.8KHz
+	.dc.l	ADM60,ADM50,ADM40,ADM30,ADM20,ADM10,ADM00,PCMC50	* 31.2KHz
+
+FRQTBL:	.dc.b	$80,$81,$00,$01,$02,$40,$40,$40		* -M0
+	.dc.b	$40,$40,$00,$01,$02,$81,$82,$40		* -M1
+	.dc.b	$80,$81,$00,$01,$02,$83,$82,$40		* -M2
+
+PCMXT2:	.dcb.l	VOLMX2-VOLMN2+1,0
+
+PCMXT3:	.dcb.l	VOLMX2-VOLMN2+1,0
+
+*--------------------------------------------------------------------
+*	ﾜｰｸｴﾘｱ
+
+BYTPT0:	.dc.l	BYTTB1		* 処理ﾊﾞｲﾄ数ﾃｰﾌﾞﾙｱﾄﾞﾚｽ
+BYTPT1:	.dc.l	BYTTB1		* 処理ﾊﾞｲﾄ数ﾃｰﾌﾞﾙｱﾄﾞﾚｽ
+EXEPTR:	.dc.l	PCMXTB		* 処理ﾙｰﾁﾝﾃｰﾌﾞﾙ
+FRQPTR:	.dc.l	FRQTBL		* 周波数ﾃｰﾌﾞﾙｱﾄﾞﾚｽ
+BFADR1:	.dc.w	0		* ADPCM出力ﾊﾞｯﾌｧｱﾄﾞﾚｽ
+PCMCHN:	.dc.w	PCMCI1		* ﾁｬﾝﾈﾙ数(最大63)
+PCMCMX:	.dc.w	PCMCI2		*   〃   の最大
+PCMFLG:	.dc.w	0		* ﾊﾞｲﾄ数変更ﾌﾗｸﾞ
+PCMFL2:	.dc.w	0		* ﾊﾞｲﾄ数変更ﾌﾗｸﾞ
+PCMBN0:	.dc.w	PCMBI1/12
+PCMBN1:	.dc.w	PCMBI1/12
+PCMBNX:	.dc.w	PCMBI2/12
+PCMBL0:	.dc.w	PCMBI1		* 1回に処理するﾊﾞｲﾄ数(12の倍数)ADPCM→DPCM用
+PCMBL1:	.dc.w	PCMBI1		*	〃		〃
+PCMBMX:	.dc.w	PCMBI2		*	〃	     の最大
+PCMBR0:	.dc.w	PCMBI1		* 1回に処理するﾊﾞｲﾄ数(12の倍数)DPCM→ADPCM用
+PCMBR1:	.dc.w	PCMBI1		*	〃		〃
+PCMBR2:	.dc.w	PCMBI1		*	〃		〃
+VOLMN0:	.dc.w	VOLMN1		* 音量指定最小値
+VOLMX0:	.dc.w	VOLMX1		* 音量指定最大値
+VOLMIN:	.dc.w	VOLMN2		* 音量指定最小値
+VOLMAX:	.dc.w	VOLMX2		* 音量指定最大値
+OUTOF1:	.dc.w	0		* 直前のPCMﾃﾞｰﾀ1:15.6KHz
+OUTOF2:	.dc.w	0		* 直前のPCMﾃﾞｰﾀ2:20.8KHz
+OUTOF3:	.dc.w	0		* 直前のPCMﾃﾞｰﾀ3:31.2KHz
+PCMOFS:	.dc.w	0		* DPCM誤差:変換時D0に入る
+PCMTBL:	.dc.l	0		* DPCM→ADPCM変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ1(ﾜｰｸ):変換時A2に入る
+TBLAD3:	.dc.l	0		* DPCM→ADPCM変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ2:変換時A3に入る
+TBLAD1:	.dc.l	0		* ADPCM→DPCM変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ情報(初期値,ｱﾄﾞﾚｽそのものではない)
+TBLAD2:	.dc.l	0		* DPCM→ADPCM変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ1(初期値)
+INTWK:	.dc.l	$FBFFDF00	* 割り込みﾚﾍﾞﾙ設定ﾌﾗｸﾞ
+M1LEN:	.dc.l	0		* 単音再生ﾓｰﾄﾞﾃﾞｰﾀ長さ
+M1ADR:	.dc.l	0		*	〃　　ｱﾄﾞﾚｽ
+INTWK2:	.dc.w	$FDFF		* 割り込みﾏｽｸ中の割り込みﾚﾍﾞﾙ
+PANFLG:	.dc.w	0		* 定位変更ﾌﾗｸﾞ
+PANWK1:	.dc.w	$0200		* 定位変更ﾜｰｸ1
+PANWK2:	.dc.w	$0200		*	〃   2
+PANWK3:	.dc.w	$0200		*	〃   3
+
+FRQMOD:	.dc.b	0		* 周波数切り替えﾓｰﾄﾞ(0:4M/8M,1:16M/8M,2:4M/8M/16M)
+FRQSEL:	.dc.b	0		* 基準周波数(0:15.6K,1:20.3K,2:31.2K)
+PCMBU1:	.dc.l	0		* 15.6KHz PCM用ﾊﾞｯﾌｧｱﾄﾞﾚｽ
+PCMBU2:	.dc.l	0		* 20.8KHz PCM用ﾊﾞｯﾌｧｱﾄﾞﾚｽ
+PCMBU3:	.dc.l	0		* 31.2KHz PCM用ﾊﾞｯﾌｧｱﾄﾞﾚｽ
+DPCMBF:	.dc.l	0		* DPCMﾊﾞｯﾌｧｱﾄﾞﾚｽ
+ADPBF1:	.dc.l	0		* ADPCMﾊﾞｯﾌｧ1ｱﾄﾞﾚｽ
+ADPBF2:	.dc.l	0		*      〃   2  〃
+ADPBFX:	.dc.l	0		* ADPCMﾀﾞﾐｰﾃﾞｰﾀｱﾄﾞﾚｽ
+CHNWK:	.dc.l	0		* ﾁｬﾝﾈﾙﾜｰｸｱﾄﾞﾚｽ
+
+*				* PCM8 音量ﾃｰﾌﾞﾙ (0～15)
+PCMXT4:	.dc.b	$6B,$6F,$71,$74,$76,$79,$7B,$7D
+	.dc.b	$80,$82,$84,$87,$8A,$8C,$8F,$91
+
+MODTBL:	.dc.b	$00,$01,$02,$03,$04,$84,$C4,$05
+	.dc.b	$85,$C5,$06,$86,$C6,$FF,$FF,$FF
+
+WK:
+ADPBFL:	.dc.b	$00		* 動作制御ﾌﾗｸﾞ:A6でｱｸｾｽ
+				*	ﾋﾞｯﾄ	機能
+				*	7	DPCM→ADPCM変換ｵﾌｾｯﾄ初期化
+				*	3	動作開始要求ﾌﾗｸﾞ
+				*	2	ｵｰﾊﾞｰﾗﾝﾌﾗｸﾞ
+				*	1	過負荷ﾌﾗｸﾞ
+				*	0	DPCMﾃﾞｰﾀ有効ﾌﾗｸﾞ,出力中ﾌﾗｸﾞ(単音再生ﾓｰﾄﾞ)
+ACTFLG:	.dc.b	0		* 動作ﾁｬﾝﾈﾙ数
+DSPFLG:	.dc.b	0		* 動作状況表示ﾌﾗｸﾞ(trap #2 設定用)
+ENDFLG:	.dc.b	0		* 割り込み処理中ﾌﾗｸﾞ
+SKPFLG:	.dc.b	0		* 一時停止ﾌﾗｸﾞ
+KEEPFL:	.dc.b	0		* 占有ﾌﾗｸﾞ
+IOCHN:	.dc.b	PCMCI1		* IOCSﾁｬﾝﾈﾙ数
+IOCHMX:	.dc.b	$FF		* 最大IOCSﾁｬﾝﾈﾙ数($FFなら最大ﾁｬﾝﾈﾙ数と同じ)
+IOCHNW:	.dc.b	$FF		* IOCS動作ﾁｬﾝﾈﾙ番号(ﾋﾞｯﾄ7=1ならﾁｬﾝﾈﾙ未定)
+SYSFLG:	.dc.b	0		* ｼｽﾃﾑ状態ﾌﾗｸﾞ
+				*	ﾋﾞｯﾄ	機能
+				*	7	単音再生ﾓｰﾄﾞ(ﾋﾞｯﾄ6,5のOR)
+				*	6	単音再生ﾓｰﾄﾞ(trap #2 設定)
+				*	5	単音再生ﾓｰﾄﾞ(ｺﾏﾝﾄﾞﾗｲﾝ設定)
+				*	4	IOCS単音ﾓｰﾄﾞ
+				*	2	音量固定ﾓｰﾄﾞ(trap #2 設定)
+				*	1	音量固定ﾓｰﾄﾞ(ｺﾏﾝﾄﾞﾗｲﾝ設定)
+				*	0	ﾃﾞﾊﾞｲｽﾄﾞﾗｲﾊﾞﾓｰﾄﾞ
+PANWK:	.dc.b	0		* 定位(0～3)
+TRYWK:	.dc.b	0		* 過負荷ﾘﾄﾗｲｶｳﾝﾀ
+M1MOD:	.dc.b	0		* 単音再生ﾓｰﾄﾞﾌﾗｸﾞ(0:ﾁｪｰﾝ無し,1:ｱﾚｲﾁｪｰﾝ,2:ﾘﾝｸｱﾚｲﾁｪｰﾝ)
+IOFLG:	.dc.b	0		* IOCS一時停止ﾌﾗｸﾞ
+
+	.even
+
+VECTBL:	.dc.w	T2VECT
+	.dc.l	T2ENT,-2
+VECTB1:	.dc.w	$006A
+	.dc.l	INTEXE,-2
+	.dc.w	$006B
+	.dc.l	INTEXE,-2
+	.dc.w	$0160
+	.dc.l	IOCS60,-2
+	.dc.w	$0161
+	.dc.l	IOCS61
+VEC61W:	.dc.l	-2
+	.dc.w	$0162
+	.dc.l	IOCS62,-2
+	.dc.w	$0163
+	.dc.l	IOCS63
+VEC63W:	.dc.l	-2
+	.dc.w	$0164
+	.dc.l	IOCS64,-2
+	.dc.w	$0165
+	.dc.l	IOCS65
+VEC65W:	.dc.l	-2
+	.dc.w	$0166
+	.dc.l	IOCS66,-2
+	.dc.w	$0167
+	.dc.l	IOCS67,-2
+	.dc.w	0
+	.dc.l	TOPADR
+
+*--------------------------------------------------------------------
+*	割り込み処理ｴﾝﾄﾘ	(ｴﾗｰ時と共通)
+
+INTEXE:	ori.w	#$0700,sr
+	tas	ENDFLG
+	bne	INTOPR
+	movem.l	d4-d7/a5-a6,-(sp)
+	lea	WK(pc),a6
+	lea	MFPIMA,a5
+	movep.w	0(a5),d7		* 割り込みﾏｽｸ
+	move.b	DMACH3-MFPIMA(a5),d4
+	move.w	INTWK+2-WK(a6),d4
+	and.w	d7,d4
+	eor.w	d4,d7
+	movep.w	d4,0(a5)
+	move.w	sr,d6
+	move.w	d6,d5
+	and.w	INTWK2-WK(a6),d5
+	move.w	d5,sr
+
+	move.b	DSPFLG-WK(a6),-(sp)
+	bmi	DISPON
+INTEXA:
+	move.w	d4,-(sp)
+	movem.l	d0-d3/a0-a4,-(sp)
+	movem.w	d5-d7,-(sp)
+	lea	DMACH3-MFPIMA(a5),a5
+
+	tst.b	SYSFLG-WK(a6)
+	bmi	IN0000
+
+	move.w	d6,sr
+	move.b	(a5),d0
+	st	(a5)
+	bmi	INTHLT
+	cmpi.b	#$40,d0
+	bcs	INT999
+	moveq	#9,d0
+	and.b	(a6),d0
+	beq	INTCNT
+	andi.b	#$F3,(a6)
+	move.w	d5,sr
+
+	tst.b	SKPFLG-WK(a6)		* 一時停止中ならｽｷｯﾌﾟ
+	bne	INT991
+
+INT010:	move.w	d6,sr
+INT011:	lsl.w	PANFLG-WK(a6)		* 定位変更
+	beq	INT013
+	bpl	INT012
+	lea	PPICTL,a0
+	move.b	PANWK3-WK(a6),(a0)
+	move.b	PANWK3+1-WK(a6),(a0)
+INT012:	move.l	PANWK1-WK(a6),PANWK2-WK(a6)
+INT013:
+
+	lsl.w	PCMFLG-WK(a6)		* 処理ﾊﾞｲﾄ数変更
+	beq	INT022
+	move.l	BYTPT0-WK(a6),BYTPT1-WK(a6)
+	move.w	PCMBL0-WK(a6),PCMBL1-WK(a6)
+	move.l	PCMBR0-WK(a6),PCMBR1-WK(a6)
+	move.w	PCMBN0-WK(a6),PCMBN1-WK(a6)
+INT022:	move.w	d5,sr
+
+	move.w	BFADR1-WK(a6),d4
+	movea.l	ADPBF1-WK(a6,d4.w),a4
+	move.w	PCMBR2-WK(a6),d3
+	movea.l	ADPBFX-WK(a6),a3
+	movea.l	a3,a0
+
+	move.w	d6,sr
+INT030:	btst	#3,(a5)
+	beq	INT033
+	btst	#0,(a6)
+	bne	INT031
+	tas	(a6)
+	bra	INT032
+INT031:	movea.l	a4,a0
+INT032:	move.l	a0,$1C(a5)		* DMA転送ｱﾄﾞﾚｽｾｯﾄ
+	move.w	d3,$1A(a5)
+	st	(a5)
+	move.b	#$48,7(a5)
+	btst	#6,7(a5)
+	bne	INT035
+	move.w	d5,sr
+
+	movea.l	a3,a0
+
+	move.w	d6,sr
+INT033:	tas	(a6)
+	move.b	#$10,7(a5)		* 継続起動
+	st	(a5)
+	move.w	d3,$A(a5)
+	move.l	a3,$C(a5)
+	btst	#0,(a6)
+	beq	INT034
+	movea.l	a4,a0
+INT034:	move.w	d3,$1A(a5)
+	move.l	a0,$1C(a5)
+	move.b	#$C8,7(a5)
+INT035:
+	and.w	INTWK-WK(a6),d6		* 割り込み許可
+	move.w	d6,sr
+
+	eori.w	#4,d4
+	move.w	d4,BFADR1-WK(a6)
+
+	bclr	#0,(a6)
+	beq	INT062
+INT040:	bclr	#7,(a6)
+	beq	INT041
+	moveq	#0,d0			* 出力ｵﾌｾｯﾄ初期化
+	moveq	#0,d1
+	movem.l	d0-d1,OUTOF1-WK(a6)
+	move.l	TBLAD2-WK(a6),PCMTBL-WK(a6)
+INT041:	move.w	PCMOFS-WK(a6),d0	* DPCM→ADPCM変換
+	movea.l	a4,a0
+	movea.l	DPCMBF-WK(a6),a1
+	movem.l	PCMTBL-WK(a6),a2-a3
+	bsr	ADPCNV
+	move.w	d0,PCMOFS-WK(a6)
+	move.l	a2,PCMTBL-WK(a6)
+INT050:	cmpi.b	#4,MPUFLG.w		* ｷｬｯｼｭ制御
+	bcs	INT060
+INT051:	moveq	#CACHEL-1,d0		* 68040以降ならｷｬｯｼｭの内容を書き戻す
+	add.w	PCMBR2-WK(a6),d0
+	lsr.w	#CACHES,d0
+INT052:	.dc.w	$F46C			* cpushl dc,(a4)
+	lea	CACHEL(a4),a4
+	dbra	d0,INT052
+INT060:	btst	#6,7(a5)		* 既に予約が消えていれば,もう一度同じﾃﾞｰﾀを出力
+	beq	INT112
+INT062:
+
+	tst.b	4*2+9*4(sp)
+	bmi	DISP81
+INTEXC:
+
+	movea.l	CHNWK(pc),a6		* ADPCM→DPCM変換合成+PCM合成
+	bsr	PCMCNV
+	lea	DMACH3,a5
+	move.b	d6,ACTFLG-WK(a6)
+	beq	INT120
+INT112:	bset	#0,(a6)
+INT120:
+
+	ori.w	#$0700,sr		* 割り込み終了処理
+
+	btst	#0,(a6)
+	beq	INT999
+	btst	#6,7(a5)
+	bne	INT999
+	movem.w	(sp),d5-d6		* 過負荷時
+	addq.b	#1,TRYWK-WK(a6)
+	cmpi.b	#TRYNUM,TRYWK-WK(a6)
+	bls	INT011
+	ori.b	#$A,(a6)
+	move.b	(a5),(a5)
+	bpl	INT999
+	move.b	#PCMSP2,PCMDAT
+
+INT999:	move.w	(sp)+,sr
+	movem.w	(sp)+,d6-d7
+	movem.l	(sp)+,d0-d3/a0-a4
+	move.w	(sp)+,d4
+	lea	MFPIMA,a5
+	sf	TRYWK-WK(a6)
+	move.w	d6,sr
+	sf	ENDFLG-WK(a6)
+	movep.w	0(a5),d6		* ┐
+	move.b	DMACH3-MFPIMA(a5),d5	* │X68030では、2つのmovepの間に幾つか命令を挟んで、
+	and.w	d4,d6			* │時間かせぎをしないと、うまく書き込めないらしい
+	or.w	d7,d6			* │
+	movep.w	d6,0(a5)		* ┘
+	tst.b	(sp)+
+	movem.l	(sp)+,d4-d7/a5-a6
+	bmi	DISPOF
+	rte
+
+INT991:	st	(a5)
+	bra	INT999
+
+DISPON:	move.w	#DCOL1,TXTPL0		* 動作状態表示ON
+	bra	INTEXA
+
+DISP81:	move.w	#DCOL2,TXTPL0		* 動作状態表示色変更
+	bra	INTEXC
+
+DISPOF:	move.w	#DCOL0,TXTPL0		* 動作状態表示OFF
+	rte
+
+INTOPR:	move.l	a5,-(sp)		* 多重割り込み対策
+	lea	DMACH3,a5
+	move.b	(a5),(a5)
+	bmi	INTOP1
+	movea.l	(sp)+,a5
+	rte
+
+INTOP1:	btst	#2,ADIOCS.w
+	bne	INTOP2
+	move.b	#PCMSPC,PCMDAT		* 終了
+	movea.l	(sp)+,a5
+	rte
+
+INTOP2:	move.b	#$01,PCMCNT
+	sf	ADIOCS.w
+	movea.l	(sp)+,a5
+	rte
+
+INTCNT:	st	(a5)			* 終了時1回ｵｰﾊﾞｰﾗﾝ
+	bclr	#2,(a6)
+	bne	INT999
+	ori.b	#$84,(a6)
+	move.w	PCMBR2-WK(a6),$1A(a5)
+	move.l	ADPBFX-WK(a6),$1C(a5)
+	move.b	#$48,7(a5)
+	bra	INT999
+
+INTHLT:	btst	#2,ADIOCS.w		* 終了処理
+	bne	INTHL2
+	tst.b	SKPFLG-WK(a6)
+	bne	INTHL1
+	bclr	#3,(a6)
+	bne	INT011
+	btst	#0,(a6)
+	bne	INT011
+INTHL1:	st	(a5)
+	move.b	#PCMSPC,PCMDAT
+	bra	INT999
+
+INTHL2:	st	(a5)
+	move.b	#$01,PCMCNT
+	sf	ADIOCS.w
+	bra	INT999
+
+IN0000:	move.w	d6,sr			* 単音再生ﾓｰﾄﾞ
+	move.b	(a5),d0
+	st	(a5)
+	bmi	IN0002
+	cmpi.b	#$40,d0
+	bcs	IN0003
+	tst.b	M1MOD-WK(a6)
+	bne	IN0003
+	move.l	M1LEN-WK(a6),d0		* 通常
+	beq	IN0003
+	move.l	#$FFF0,d1
+	cmp.l	d1,d0
+	bcc	IN0001
+	move.l	d0,d1
+IN0001:	sub.l	d1,d0
+	move.l	d0,M1LEN-WK(a6)
+	movea.l	M1ADR-WK(a6),a0
+	move.l	a0,$1C(a5)
+	move.w	d1,$1A(a5)
+	move.b	#$48,7(a5)
+	add.l	a0,d1
+	move.l	d1,M1ADR-WK(a6)
+	bra	INT999
+
+IN0002:	cmpi.b	#1,M1MOD-WK(a6)		* 終了
+	bcc	IN0004
+IN0003:	bclr	#0,(a6)
+	bclr	#2,(a6)
+	beq	IN0030
+	
+
+
+IN0030:	move.b	#PCMSPC,PCMDAT
+	sf	ADIOCS.w
+	bra	INT999
+
+IN0004:	sf	M1MOD-WK(a6)
+	bne	IN0005
+	move.w	M1LEN+2-WK(a6),$1A(a5)	* ｱﾚｲﾁｪｰﾝ
+	move.w	#$3A88,d0
+	bra	IN0006
+
+IN0005:	move.w	#$3E88,d0		* ﾘﾝｸｱﾚｲﾁｪｰﾝ
+IN0006:	move.l	M1ADR-WK(a6),$1C(a5)
+	movep.w	d0,5(a5)
+	move.b	#$02,PCMCNT
+	bra	INT999
+
+ADPCNV:	moveq	#0,d2			* DPCM → ADPCM 変換
+	lsr.w	#2,d3
+	dbra	d3,ADPCN1
+	rts
+ADPCN1:	.rept	4
+	PCM2AD
+	.endm
+	dbra	d3,ADPCN1
+	rts
+
+PCMCLR:	tas	(a6)
+	lea	$20(a6),a6
+	dbra	d7,PCMCLR
+	lea	WK(pc),a6
+	rts
+
+* IN	A6	動作ﾃｰﾌﾞﾙ先頭ｱﾄﾞﾚｽ
+* OUT	A6	WK を指している
+*
+PCMCNV:	move.w	PCMCHN(pc),d7		* ADPCM → DPCM変換+合成
+	subq.w	#1,d7
+	ext.l	d7
+	moveq	#0,d6
+	bclr	#1,ADPBFL		* 過負荷ならﾃｰﾌﾞﾙをｸﾘｱして終了
+	bne	PCMCLR
+	movea.l	BYTPT1(pc),a5
+PCMCN1:	swap	d7
+	move.w	sr,d5
+	ori.w	#$0700,sr
+	move.b	(a6),d7			* 動作状態ﾁｪｯｸ
+	bmi	PCMC0E
+	moveq	#$1F,d3
+	and.b	d3,(a6)
+	move.b	2(a6),d3
+	andi.b	#3,d7
+	bne	PCMC10
+	movem.l	4(a6),d0-d2/a0/a3
+	move.w	d5,sr
+	moveq	#0,d5
+	lsl.w	#3,d3
+	lea	1(a5,d3.w),a4
+	move.b	(a4)+,d7
+	bmi	PCMC0F
+	move.w	(a4)+,d3
+	movea.l	(a4)+,a1		* DPCM/PCM用ﾊﾞｯﾌｧ
+	lea	PCMC03(pc),a4
+	addi.w	#$100,d7
+	btst	d7,d7
+	bne	PCMC01
+	adda.w	-2(a3),a3
+PCMC01:	sub.l	d3,d2
+	bcc	PCMC02
+	neg.w	d2
+	sub.w	d2,d3
+	swap	d3
+	move.w	d2,d3
+	swap	d3
+	moveq	#0,d2
+PCMC02:	jmp	(a3)
+PCMC03:	tst.l	d2			* ﾃﾞｰﾀ終わり？
+	seq	d4
+	btst	d7,d7
+	bne	PCMC05
+	swap	d3
+	tst.w	d3
+	beq	PCMC05
+	adda.w	-2(a3),a3
+	lea	PCMC05(pc),a4
+	jmp	(a3)
+PCMC05:	andi.w	#$80,d4
+	move.w	sr,d5
+	ori.w	#$0700,sr
+	bclr	#6,(a6)
+	bne	PCMC0X
+	or.b	d4,(a6)
+	move.l	d0,4(a6)
+	movem.l	d2/a0,$C(a6)
+PCMC0X:	bset	d7,d7
+PCMC0E:	move.w	d5,sr
+PCMC0F:	lea	$20(a6),a6
+	swap	d7
+	subq.b	#1,d7
+	bcc	PCMCN1
+	lea	WK(pc),a6
+	cmpi.w	#$2000,d7
+	bcc	PCMC3
+	swap	d7
+	moveq	#0,d6
+	move.w	d7,-(sp)
+	move.b	(sp)+,d6
+	rts
+
+PCMC10:	cmpi.b	#2,d7
+	bhi	PCMC0E
+	beq	PCMC20
+	movem.l	4(a6),d0-d2/a0/a3
+	movem.l	$18(a6),d4/a2
+	move.w	d5,sr
+	moveq	#0,d5
+	movem.l	d4/a2,-(sp)
+	lsl.w	#3,d3
+	lea	1(a5,d3.w),a4
+	move.b	(a4)+,d7
+	bmi	PCMC0F
+	move.w	(a4)+,d3
+	movea.l	(a4)+,a1		* DPCM/PCM用ﾊﾞｯﾌｧ
+	lea	PCMC13(pc),a4
+	addi.w	#$100,d7
+	btst	d7,d7
+	bne	PCMC11
+	adda.w	-2(a3),a3
+PCMC11:	sub.w	d3,d2
+	bcc	PCMC12
+	neg.w	d2
+	sub.w	d2,d3
+	swap	d3
+	move.w	d2,d3
+	swap	d3
+	moveq	#0,d2
+PCMC12:	jmp	(a3)
+PCMC13:	moveq	#0,d4
+	tst.l	d2			* ﾃﾞｰﾀ終わり？
+	bne	PCMC15
+	clr.w	d3
+	swap	d3
+	movem.l	(sp),d4/a2		* ｱﾚｲﾁｪｰﾝ
+	subq.l	#1,d4
+	bcs	PCMC14
+	movea.l	(a2)+,a0
+	move.w	(a2)+,d2
+	movem.l	d4/a2,(sp)
+	bne	PCMC11
+PCMC14:	moveq	#$80,d4
+	btst	d7,d7
+	bne	PCMC15
+	adda.w	-2(a3),a3
+	lea	PCMC15(pc),a4
+	jmp	(a3)
+PCMC15:	movem.l	(sp)+,a1-a2
+	move.w	sr,d5
+	ori.w	#$0700,sr
+	bclr	#6,(a6)
+	bne	PCMC0X
+	or.b	d4,(a6)
+	move.l	d0,4(a6)
+	movem.l	d2/a0,$C(a6)
+	movem.l	a1-a2,$18(a6)
+	bra	PCMC0X
+
+PCMC20:	movem.l	4(a6),d0-d2/a0/a3
+	movea.l	$1C(a6),a2
+	move.w	d5,sr
+	moveq	#0,d5
+	move.l	a2,-(sp)
+	lsl.w	#3,d3
+	lea	1(a5,d3.w),a4
+	move.b	(a4)+,d7
+	bmi	PCMC0F
+	move.w	(a4)+,d3
+	movea.l	(a4)+,a1		* DPCM/PCM用ﾊﾞｯﾌｧ
+	lea	PCMC23(pc),a4
+	addi.w	#$100,d7
+	btst	d7,d7
+	bne	PCMC21
+	adda.w	-2(a3),a3
+PCMC21:	sub.w	d3,d2
+	bcc	PCMC22
+	neg.w	d2
+	sub.w	d2,d3
+	swap	d3
+	move.w	d2,d3
+	swap	d3
+	moveq	#0,d2
+PCMC22:	jmp	(a3)
+PCMC23:	moveq	#0,d4
+	tst.l	d2			* ﾃﾞｰﾀ終わり？
+	bne	PCMC25
+	clr.w	d3
+	swap	d3
+	movea.l	(sp),a2			* ﾘﾝｸｱﾚｲﾁｪｰﾝ
+	move.l	(a2)+,d4
+	beq	PCMC24
+	movea.l	d4,a2
+	movea.l	(a2)+,a0
+	move.w	(a2)+,d2
+	movem.l	a2,(sp)
+	bne	PCMC21
+PCMC24:	moveq	#$80,d4
+	btst	d7,d7
+	bne	PCMC25
+	adda.w	-2(a3),a3
+	lea	PCMC25(pc),a4
+	jmp	(a3)
+PCMC25:	movea.l	(sp)+,a1
+	move.w	sr,d5
+	ori.w	#$0700,sr
+	bclr	#6,(a6)
+	bne	PCMC0X
+	or.b	d4,(a6)
+	move.l	d0,4(a6)
+	movem.l	d2/a0,$C(a6)
+	move.l	a1,$1C(a6)
+	bra	PCMC0X
+
+PCMC3:	movea.l	DPCMBF-WK(a6),a5
+	move.w	PCMBL1-WK(a6),d6
+	movea.l	EXEPTR-WK(a6),a0
+	movea.l	4*7(a0),a0
+	jmp	(a0)
+
+PCMC30:	lsr.w	#2,d6
+	btst	#12,d7
+	bne	PCMC341
+	add.w	d7,d7
+	bcc	PCMC321
+	movea.l	a5,a1
+	movea.l	PCMBU3-WK(a6),a0
+	move.w	OUTOF3-WK(a6),d0
+	move.w	d6,d5
+	subq.w	#1,d5
+PCMC312:
+	.rept	4
+	movem.w	(a0)+,d1-d2
+	add.w	d2,d1
+	asr.w	#1,d1
+	sub.w	d1,d0
+	move.w	d0,(a1)+
+	movem.w	(a0)+,d0/d2
+	add.w	d2,d0
+	asr.w	#1,d0
+	sub.w	d0,d1
+	move.w	d1,(a1)+
+	.endm
+	dbra	d5,PCMC312
+	bra	PCMC343
+PCMC321:
+	add.w	d7,d7
+	bcc	PCMC331
+	movea.l	a5,a1
+	movea.l	PCMBU2-WK(a6),a0
+	move.w	OUTOF2-WK(a6),d4
+	move.w	d6,d5
+	add.w	d5,d5
+	subq.w	#3,d5
+PCMC322:
+	.rept	2
+	movem.w	(a0)+,d0-d3
+	sub.w	d0,d4
+	move.w	d4,(a1)+
+	add.w	d2,d1
+	asr.w	#1,d1
+	sub.w	d1,d0
+	move.w	d0,(a1)+
+	sub.w	d3,d1
+	move.w	d1,(a1)+
+	movem.w	(a0)+,d0-d2/d4
+	sub.w	d0,d3
+	move.w	d3,(a1)+
+	add.w	d2,d1
+	asr.w	#1,d1
+	sub.w	d1,d0
+	move.w	d0,(a1)+
+	sub.w	d4,d1
+	move.w	d1,(a1)+
+	.endm
+	subq.w	#3,d5
+	bcc	PCMC322
+	bra	PCMC353
+PCMC331:
+	movea.l	a5,a1
+	movea.l	PCMBU1-WK(a6),a0
+	move.w	OUTOF1-WK(a6),d0
+	move.w	d6,d5
+	subq.w	#1,d5
+PCMC332:
+	.rept	4
+	move.w	(a0)+,d1
+	sub.w	d1,d0
+	move.w	d0,(a1)+
+	move.w	(a0)+,d0
+	sub.w	d0,d1
+	move.w	d1,(a1)+
+	.endm
+	dbra	d5,PCMC332
+	bra	PCMC363
+PCMC341:
+	add.w	d7,d7
+	bcc	PCMC351
+	movea.l	a5,a1
+	movea.l	PCMBU3-WK(a6),a0
+	move.w	OUTOF3-WK(a6),d0
+	move.w	d6,d5
+	subq.w	#1,d5
+PCMC342:
+	.rept	4
+	movem.w	(a0)+,d1-d2
+	add.w	d2,d1
+	asr.w	#1,d1
+	sub.w	d1,d0
+	add.w	d0,(a1)+
+	movem.w	(a0)+,d0/d2
+	add.w	d2,d0
+	asr.w	#1,d0
+	sub.w	d0,d1
+	add.w	d1,(a1)+
+	.endm
+	dbra	d5,PCMC342
+PCMC343:
+	move.w	d0,OUTOF3-WK(a6)
+PCMC351:
+	add.w	d7,d7
+	bcc	PCMC361
+	movea.l	a5,a1
+	movea.l	PCMBU2-WK(a6),a0
+	move.w	OUTOF2-WK(a6),d4
+	move.w	d6,d5
+	add.w	d5,d5
+	subq.w	#3,d5
+PCMC352:
+	.rept	2
+	movem.w	(a0)+,d0-d3
+	sub.w	d0,d4
+	add.w	d4,(a1)+
+	add.w	d2,d1
+	asr.w	#1,d1
+	sub.w	d1,d0
+	add.w	d0,(a1)+
+	sub.w	d3,d1
+	add.w	d1,(a1)+
+	movem.w	(a0)+,d0-d2/d4
+	sub.w	d0,d3
+	add.w	d3,(a1)+
+	add.w	d2,d1
+	asr.w	#1,d1
+	sub.w	d1,d0
+	add.w	d0,(a1)+
+	sub.w	d4,d1
+	add.w	d1,(a1)+
+	.endm
+	subq.w	#3,d5
+	bcc	PCMC352
+PCMC353:
+	move.w	d4,OUTOF2-WK(a6)
+PCMC361:
+	add.w	d7,d7
+	bcc	PCMC3X
+	movea.l	a5,a1
+	movea.l	PCMBU1-WK(a6),a0
+	move.w	OUTOF1-WK(a6),d0
+	move.w	d6,d5
+	subq.w	#1,d5
+PCMC362:
+	.rept	4
+	move.w	(a0)+,d1
+	sub.w	d1,d0
+	add.w	d0,(a1)+
+	move.w	(a0)+,d0
+	sub.w	d0,d1
+	add.w	d1,(a1)+
+	.endm
+	dbra	d5,PCMC362
+PCMC363:
+	move.w	d0,OUTOF1-WK(a6)
+PCMC3X:	swap	d7
+	move.w	d7,-(sp)
+	moveq	#0,d6
+	move.b	(sp)+,d6
+	rts
+
+PCMC40:	btst	#12,d7
+	bne	PCMC441
+	add.w	d7,d7
+	bcc	PCMC421
+	movea.l	a5,a1
+	movea.l	PCMBU3-WK(a6),a0
+	move.w	OUTOF3-WK(a6),d3
+	move.w	d6,d5
+	subq.w	#3,d5
+PCMC412:
+	.rept	2
+	movem.w	(a0)+,d0-d2
+	asr.w	#1,d1
+	add.w	d1,d0
+	add.w	d1,d2
+	sub.w	d0,d3
+	move.w	d3,(a1)+
+	sub.w	d2,d0
+	move.w	d0,(a1)+
+	movem.w	(a0)+,d0-d1/d3
+	asr.w	#1,d1
+	add.w	d1,d0
+	add.w	d1,d3
+	sub.w	d0,d2
+	move.w	d2,(a1)+
+	sub.w	d3,d0
+	move.w	d0,(a1)+
+	.endm
+	subq.w	#3,d5
+	bcc	PCMC412
+	bra	PCMC443
+PCMC421:
+	add.w	d7,d7
+	bcc	PCMC431
+	movea.l	a5,a1
+	movea.l	PCMBU2-WK(a6),a0
+	move.w	OUTOF2-WK(a6),d0
+	move.w	d6,d5
+	subq.w	#3,d5
+PCMC422:
+	.rept	4
+	move.w	(a0)+,d1
+	sub.w	d1,d0
+	move.w	d0,(a1)+
+	move.w	(a0)+,d0
+	sub.w	d0,d1
+	move.w	d1,(a1)+
+	.endm
+	subq.w	#3,d5
+	bcc	PCMC422
+	bra	PCMC453
+PCMC431:
+	movea.l	a5,a1
+	movea.l	PCMBU1-WK(a6),a0
+	move.w	OUTOF1-WK(a6),d3
+	move.w	d6,d5
+	lsr.w	#1,d5
+	subq.w	#3,d5
+	moveq	#0,d4
+PCMC432:
+	.rept	2
+	movem.w	(a0)+,d0-d2
+	sub.w	d0,d3
+	move.w	d3,(a1)+
+	sub.w	d1,d0
+	move.w	d0,(a1)+
+	move.w	d4,(a1)+
+	sub.w	d2,d1
+	move.w	d1,(a1)+
+	movem.w	(a0)+,d0-d1/d3
+	sub.w	d0,d2
+	move.w	d2,(a1)+
+	sub.w	d1,d0
+	move.w	d0,(a1)+
+	move.w	d4,(a1)+
+	sub.w	d3,d1
+	move.w	d1,(a1)+
+	.endm
+	subq.w	#3,d5
+	bcc	PCMC432
+	bra	PCMC463
+PCMC441:
+	add.w	d7,d7
+	bcc	PCMC451
+	movea.l	a5,a1
+	movea.l	PCMBU3-WK(a6),a0
+	move.w	OUTOF3-WK(a6),d3
+	move.w	d6,d5
+	subq.w	#3,d5
+PCMC442:
+	.rept	2
+	movem.w	(a0)+,d0-d2
+	asr.w	#1,d1
+	add.w	d1,d0
+	add.w	d1,d2
+	sub.w	d0,d3
+	add.w	d3,(a1)+
+	sub.w	d2,d0
+	add.w	d0,(a1)+
+	movem.w	(a0)+,d0-d1/d3
+	asr.w	#1,d1
+	add.w	d1,d0
+	add.w	d1,d3
+	sub.w	d0,d2
+	add.w	d2,(a1)+
+	sub.w	d3,d0
+	add.w	d0,(a1)+
+	.endm
+	subq.w	#3,d5
+	bcc	PCMC442
+PCMC443:
+	move.w	d3,OUTOF3-WK(a6)
+PCMC451:
+	add.w	d7,d7
+	bcc	PCMC461
+	movea.l	a5,a1
+	movea.l	PCMBU2-WK(a6),a0
+	move.w	OUTOF2-WK(a6),d0
+	move.w	d6,d5
+	subq.w	#3,d5
+PCMC452:
+	.rept	4
+	move.w	(a0)+,d1
+	sub.w	d1,d0
+	add.w	d0,(a1)+
+	move.w	(a0)+,d0
+	sub.w	d0,d1
+	add.w	d1,(a1)+
+	.endm
+	subq.w	#3,d5
+	bcc	PCMC452
+PCMC453:
+	move.w	d0,OUTOF2-WK(a6)
+PCMC461:
+	add.w	d7,d7
+	bcc	PCMC4X
+	movea.l	a5,a1
+	movea.l	PCMBU1-WK(a6),a0
+	move.w	OUTOF1-WK(a6),d3
+	move.w	d6,d5
+	lsr.w	#1,d5
+	subq.w	#3,d5
+PCMC462:
+	.rept	2
+	movem.w	(a0)+,d0-d2
+	sub.w	d0,d3
+	add.w	d3,(a1)+
+	sub.w	d1,d0
+	add.w	d0,(a1)+
+	addq.l	#2,a1
+	sub.w	d2,d1
+	add.w	d1,(a1)+
+	movem.w	(a0)+,d0-d1/d3
+	sub.w	d0,d2
+	add.w	d2,(a1)+
+	sub.w	d1,d0
+	add.w	d0,(a1)+
+	addq.l	#2,a1
+	sub.w	d3,d1
+	add.w	d1,(a1)+
+	.endm
+	subq.w	#3,d5
+	bcc	PCMC462
+PCMC463:
+	move.w	d3,OUTOF1-WK(a6)
+PCMC4X:	swap	d7
+	move.w	d7,-(sp)
+	moveq	#0,d6
+	move.b	(sp)+,d6
+	rts
+
+PCMC50:	lsr.w	#1,d6
+	moveq	#0,d4
+	btst	#12,d7
+	bne	PCMC541
+	add.w	d7,d7
+	bcc	PCMC521
+	movea.l	a5,a1
+	movea.l	PCMBU3-WK(a6),a0
+	move.w	OUTOF3-WK(a6),d0
+	move.w	d6,d5
+	subq.w	#1,d5
+PCMC512:
+	.rept	4
+	move.w	(a0)+,d1
+	sub.w	d1,d0
+	move.w	d0,(a1)+
+	move.w	(a0)+,d0
+	sub.w	d0,d1
+	move.w	d1,(a1)+
+	.endm
+	dbra	d5,PCMC512
+	bra	PCMC543
+PCMC521:
+	add.w	d7,d7
+	bcc	PCMC531
+	movea.l	a5,a1
+	movea.l	PCMBU2-WK(a6),a0
+	move.w	OUTOF2-WK(a6),d2
+	move.w	d6,d5
+	subq.w	#3,d5
+PCMC522:
+	.rept	4
+	movem.w	(a0)+,d0-d1
+	sub.w	d0,d2
+	move.w	d2,(a1)+
+	move.w	d4,(a1)+
+	sub.w	d1,d0
+	move.w	d0,(a1)+
+	movem.w	(a0)+,d0/d2
+	sub.w	d0,d1
+	move.w	d1,(a1)+
+	move.w	d4,(a1)+
+	sub.w	d2,d0
+	move.w	d0,(a1)+
+	.endm
+	subq.w	#3,d5
+	bcc	PCMC522
+	bra	PCMC553
+PCMC531:
+	movea.l	a5,a1
+	movea.l	PCMBU1-WK(a6),a0
+	move.w	OUTOF1-WK(a6),d0
+	move.w	d6,d5
+	subq.w	#1,d5
+PCMC532:
+	.rept	2
+	move.w	(a0)+,d1
+	sub.w	d1,d0
+	move.w	d0,(a1)+
+	move.w	d4,(a1)+
+	move.w	(a0)+,d0
+	sub.w	d0,d1
+	move.w	d1,(a1)+
+	move.w	d4,(a1)+
+	.endm
+	dbra	d5,PCMC532
+	bra	PCMC563
+PCMC541:
+	add.w	d7,d7
+	bcc	PCMC551
+	movea.l	a5,a1
+	movea.l	PCMBU3-WK(a6),a0
+	move.w	OUTOF3-WK(a6),d0
+	move.w	d6,d5
+	subq.w	#1,d5
+PCMC542:
+	.rept	4
+	move.w	(a0)+,d1
+	sub.w	d1,d0
+	add.w	d0,(a1)+
+	move.w	(a0)+,d0
+	sub.w	d0,d1
+	add.w	d1,(a1)+
+	.endm
+	dbra	d5,PCMC542
+PCMC543:
+	move.w	d0,OUTOF3-WK(a6)
+PCMC551:
+	add.w	d7,d7
+	bcc	PCMC561
+	movea.l	a5,a1
+	movea.l	PCMBU2-WK(a6),a0
+	move.w	OUTOF2-WK(a6),d2
+	move.w	d6,d5
+	subq.w	#3,d5
+PCMC552:
+	.rept	4
+	movem.w	(a0)+,d0-d1
+	sub.w	d0,d2
+	add.w	d2,(a1)+
+	addq.l	#2,a1
+	sub.w	d1,d0
+	add.w	d0,(a1)+
+	movem.w	(a0)+,d0/d2
+	sub.w	d0,d1
+	add.w	d1,(a1)+
+	addq.l	#2,a1
+	sub.w	d2,d0
+	add.w	d0,(a1)+
+	.endm
+	subq.w	#3,d5
+	bcc	PCMC552
+PCMC553:
+	move.w	d2,OUTOF2-WK(a6)
+PCMC561:
+	add.w	d7,d7
+	bcc	PCMC5X
+	movea.l	a5,a1
+	movea.l	PCMBU1-WK(a6),a0
+	move.w	OUTOF1-WK(a6),d0
+	move.w	d6,d5
+	subq.w	#1,d5
+PCMC562:
+	.rept	2
+	move.w	(a0)+,d1
+	sub.w	d1,d0
+	add.w	d0,(a1)+
+	addq.l	#2,a1
+	move.w	(a0)+,d0
+	sub.w	d0,d1
+	add.w	d1,(a1)+
+	addq.l	#2,a1
+	.endm
+	dbra	d5,PCMC562
+PCMC563:
+	move.w	d0,OUTOF1-WK(a6)
+PCMC5X:	swap	d7
+	move.w	d7,-(sp)
+	moveq	#0,d6
+	move.b	(sp)+,d6
+	rts
+
+	.dc.w	ADM01-ADM00
+
+ADM00:	moveq	#3,d4
+	and.w	d3,d4
+	lsr.w	#2,d3
+	move.b	ADM001(pc,d4.w),d4
+	jmp	ADM002(pc,d4.w)
+
+ADM001:	.dc.b	64,48,32,16	* A2P00:16ﾊﾞｲﾄ
+
+ADM002:	.rept	4
+	A2P00
+	.endm
+	dbra	d3,ADM002
+	jmp	(a4)
+
+	.dc.w	ADM0X-ADM01
+
+ADM01:	moveq	#3,d4
+	and.w	d3,d4
+	lsr.w	#2,d3
+	move.b	ADM011(pc,d4.w),d4
+	jmp	ADM012(pc,d4.w)
+
+ADM011:	.dc.b	56,42,28,14	* A2P01:14ﾊﾞｲﾄ
+
+ADM012:	.rept	4
+	A2P01
+	.endm
+	dbra	d3,ADM012
+	jmp	(a4)
+
+ADM0X1:	move.l	d6,(a1)+
+ADM0X:	dbra	d3,ADM0X1
+	jmp	(a4)
+
+	.dc.w	ADM11-ADM10
+
+ADM10:	dbra	d3,ADM101
+	jmp	(a4)
+ADM101:	A2P10
+	dbra	d3,ADM101
+	jmp	(a4)
+
+	.dc.w	ADM1X-ADM11
+
+ADM11:	dbra	d3,ADM111
+	jmp	(a4)
+ADM111:	A2P11
+	dbra	d3,ADM111
+	jmp	(a4)
+
+ADM1X1:	move.l	d6,(a1)+
+	move.w	d6,(a1)+
+ADM1X:	dbra	d3,ADM1X1
+	jmp	(a4)
+
+	.dc.w	ADM21-ADM20
+
+ADM20:	dbra	d3,ADM201
+	jmp	(a4)
+ADM201:	A2P20
+	dbra	d3,ADM201
+	jmp	(a4)
+
+	.dc.w	ADM2X-ADM21
+
+ADM21:	dbra	d3,ADM211
+	jmp	(a4)
+ADM211:	A2P21
+	dbra	d3,ADM211
+	jmp	(a4)
+
+ADM2X1:	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+ADM2X:	dbra	d3,ADM2X1
+	jmp	(a4)
+
+	.dc.w	ADM31-ADM30
+
+ADM30:	dbra	d3,ADM301
+	jmp	(a4)
+ADM301:	A2P30
+	dbra	d3,ADM301
+	jmp	(a4)
+
+	.dc.w	ADM3X-ADM31
+
+ADM31:	dbra	d3,ADM311
+	jmp	(a4)
+ADM311:	A2P31
+	dbra	d3,ADM311
+	jmp	(a4)
+
+ADM3X1:	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+ADM3X:	dbra	d3,ADM3X1
+	jmp	(a4)
+
+	.dc.w	ADM41-ADM40
+
+ADM40:	dbra	d3,ADM401
+	jmp	(a4)
+ADM401:	A2P40
+	dbra	d3,ADM401
+	jmp	(a4)
+
+	.dc.w	ADM4X-ADM41
+
+ADM41:	dbra	d3,ADM411
+	jmp	(a4)
+ADM411:	A2P41
+	dbra	d3,ADM411
+	jmp	(a4)
+
+ADM4X1:	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+ADM4X:	dbra	d3,ADM4X1
+	jmp	(a4)
+
+	.dc.w	ADM51-ADM50
+
+ADM50:	dbra	d3,ADM501
+	jmp	(a4)
+ADM501:	A2P50
+	dbra	d3,ADM501
+	jmp	(a4)
+
+	.dc.w	ADM5X-ADM51
+
+ADM51:	dbra	d3,ADM511
+	jmp	(a4)
+ADM511:	A2P51
+	dbra	d3,ADM511
+	jmp	(a4)
+
+ADM5X1:	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+ADM5X:	dbra	d3,ADM5X1
+	jmp	(a4)
+
+	.dc.w	ADM61-ADM60
+
+ADM60:	dbra	d3,ADM601
+	jmp	(a4)
+ADM601:	A2P60
+	dbra	d3,ADM601
+	jmp	(a4)
+
+	.dc.w	ADM6X-ADM61
+
+ADM61:	dbra	d3,ADM611
+	jmp	(a4)
+ADM611:	A2P61
+	dbra	d3,ADM611
+	jmp	(a4)
+
+ADM6X1:	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+ADM6X:	dbra	d3,ADM6X1
+	jmp	(a4)
+
+	.dc.w	ADM71-ADM70
+
+ADM70:	tst.w	d5
+	beq	ADM702
+	dbra	d3,ADM701
+	jmp	(a4)
+ADM701:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.l	d0,(a1)+
+	move.l	(a2),d0
+	moveq	#0,d5
+ADM702:	moveq	#1,d4
+	and.w	d3,d4
+	lsr.w	#1,d3
+	dbra	d3,ADM703
+	bra	ADM704
+ADM703:	A2P70
+	dbra	d3,ADM703
+ADM704:	dbra	d4,ADM705
+	jmp	(a4)
+ADM705:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),d0
+	add.w	2(a2,d1.l),d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	moveq	#1,d5
+	jmp	(a4)
+
+	.dc.w	ADM7X-ADM71
+
+ADM71:	tst.w	d5
+	beq	ADM712
+	dbra	d3,ADM711
+	jmp	(a4)
+ADM711:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),(a1)+
+	move.l	(a2),d0
+	moveq	#0,d5
+ADM712:	moveq	#1,d4
+	and.w	d3,d4
+	lsr.w	#1,d3
+	dbra	d3,ADM713
+	bra	ADM714
+ADM713:	A2P71
+	dbra	d3,ADM713
+ADM714:	dbra	d4,ADM715
+	jmp	(a4)
+ADM715:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),d0
+	add.w	2(a2,d1.l),d0
+	move.w	d0,(a1)+
+	move.l	(a2),d0
+	move.l	d6,(a1)
+	moveq	#1,d5
+	jmp	(a4)
+
+ADM7X1:	move.l	d6,(a1)+
+	move.w	d6,(a1)+
+ADM7X:	subq.w	#2,d3
+	bcc	ADM7X1
+	jmp	(a4)
+
+	.dc.w	ADM81-ADM80
+
+ADM80:	moveq	#3,d4
+	and.w	d3,d4
+	lsr.w	#2,d3
+	move.b	ADM801(pc,d4.w),d4
+	jmp	ADM802(pc,d4.w)
+
+ADM801:	.dc.b	80,60,40,20	* A2P80:20ﾊﾞｲﾄ
+
+ADM802:	.rept	4
+	A2P80
+	.endm
+	dbra	d3,ADM802
+	jmp	(a4)
+
+	.dc.w	ADM8X-ADM81
+
+ADM81:	moveq	#3,d4
+	and.w	d3,d4
+	lsr.w	#2,d3
+	move.b	ADM811(pc,d4.w),d4
+	jmp	ADM812(pc,d4.w)
+
+ADM811:	.dc.b	80,60,40,20	* A2P81:20ﾊﾞｲﾄ
+
+ADM812:	.rept	4
+	A2P81
+	.endm
+	dbra	d3,ADM812
+	jmp	(a4)
+
+ADM8X1:	move.w	d6,(a1)+
+ADM8X:	dbra	d3,ADM8X1
+	jmp	(a4)
+
+	.dc.w	ADMA1-ADMA0
+
+ADMA0:	tst.w	d5
+	beq	ADMA04
+	subq.w	#1,d5
+	beq	ADMA02
+	dbra	d3,ADMA01
+	jmp	(a4)
+ADMA01:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,4(a1)
+	swap	d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	moveq	#1,d5
+ADMA02:	dbra	d3,ADMA03
+	jmp	(a4)
+ADMA03:	addq.l	#4,a1
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.l	d0,(a1)+
+	move.l	(a2),d0
+	addq.l	#2,a1
+	moveq	#0,d5
+ADMA04:	subq.w	#3,d3
+	bcs	ADMA06
+ADMA05:	A2PA0
+	subq.w	#3,d3
+	bcc	ADMA05
+ADMA06:	add.w	d3,d3
+	move.w	ADMA07(pc,d3.w),d3
+	jmp	ADMA07(pc,d3.w)
+	.dc.w	ADMA09-ADMA07,ADMA08-ADMA07,0
+ADMA07:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.l	d0,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,4(a1)
+	swap	d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	moveq	#1,d5
+	jmp	(a4)
+ADMA08:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.l	d0,(a1)
+	move.l	(a2),d0
+	moveq	#2,d5
+ADMA09:	jmp	(a4)
+
+	.dc.w	ADMAX-ADMA1
+
+ADMA1:	tst.w	d5
+	beq	ADMA14
+	subq.w	#1,d5
+	beq	ADMA12
+	dbra	d3,ADMA11
+	jmp	(a4)
+ADMA11:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),-12(a1)
+	move.w	2(a2,d1.l),-8(a1)
+	move.l	(a2),d0
+	moveq	#1,d5
+ADMA12:	dbra	d3,ADMA13
+	jmp	(a4)
+ADMA13:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),-6(a1)
+	move.l	(a2),d0
+	moveq	#0,d5
+ADMA14:	subq.w	#3,d3
+	bcs	ADMA16
+ADMA15:	A2PA1
+	subq.w	#3,d3
+	bcc	ADMA15
+ADMA16:	add.w	d3,d3
+	move.w	ADMA17(pc,d3.w),d3
+	jmp	ADMA17(pc,d3.w)
+	.dc.w	ADMA19-ADMA17,ADMA18-ADMA17,0
+ADMA17:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.l	(a2),d0
+	move.w	d6,(a1)+
+	move.l	d6,(a1)+
+	moveq	#1,d5
+	jmp	(a4)
+ADMA18:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),(a1)+
+	move.l	(a2),d0
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	moveq	#2,d5
+ADMA19:	jmp	(a4)
+
+ADMAX1:	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+ADMAX:	subq.w	#3,d3
+	bcc	ADMAX1
+	jmp	(a4)
+
+	.dc.w	ADMB1-ADMB0
+
+ADMB0:	tst.w	d5
+	beq	ADMB04
+	subq.w	#1,d5
+	beq	ADMB02
+	dbra	d3,ADMB01
+	jmp	(a4)
+ADMB01:	addq.l	#8,a1
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,6(a1)
+	swap	d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	moveq	#1,d5
+ADMB02:	dbra	d3,ADMB03
+	jmp	(a4)
+ADMB03:	addq.l	#8,a1
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,6(a1)
+	swap	d0
+	add.w	d0,(a1)
+	move.l	(a2),d0
+	lea	12(a1),a1
+	moveq	#0,d5
+ADMB04:	subq.w	#3,d3
+	bcs	ADMB06
+ADMB05:	A2PB0
+	subq.w	#3,d3
+	bcc	ADMB05
+ADMB06:	add.w	d3,d3
+	move.w	ADMB07(pc,d3.w),d3
+	jmp	ADMB07(pc,d3.w)
+	.dc.w	ADMB09-ADMB07,ADMB08-ADMB07,0
+ADMB07:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,6(a1)
+	swap	d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	addq.l	#8,a1
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,6(a1)
+	swap	d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	moveq	#1,d5
+	jmp	(a4)
+ADMB08:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,6(a1)
+	swap	d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	moveq	#2,d5
+ADMB09:	jmp	(a4)
+
+	.dc.w	ADMBX-ADMB1
+
+ADMB1:	tst.w	d5
+	beq	ADMB14
+	subq.w	#1,d5
+	beq	ADMB12
+	dbra	d3,ADMB11
+	jmp	(a4)
+ADMB11:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),-22(a1)
+	move.w	2(a2,d1.l),-16(a1)
+	move.l	(a2),d0
+	moveq	#1,d5
+ADMB12:	dbra	d3,ADMB13
+	jmp	(a4)
+ADMB13:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),-12(a1)
+	move.w	2(a2,d1.l),-6(a1)
+	move.l	(a2),d0
+	moveq	#0,d5
+ADMB14:	subq.w	#3,d3
+	bcs	ADMB16
+ADMB15:	A2PB1
+	subq.w	#3,d3
+	bcc	ADMB15
+ADMB16:	add.w	d3,d3
+	move.w	ADMB17(pc,d3.w),d3
+	jmp	ADMB17(pc,d3.w)
+	.dc.w	ADMB19-ADMB17,ADMB18-ADMB17,0
+ADMB17:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.w	d6,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.l	(a2),d0
+	move.w	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	moveq	#1,d5
+	jmp	(a4)
+ADMB18:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.l	(a2),d0
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	moveq	#2,d5
+ADMB19:	jmp	(a4)
+
+ADMBX1:	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+ADMBX:	subq.w	#3,d3
+	bcc	ADMBX1
+	jmp	(a4)
+
+	.dc.w	ADMC1-ADMC0
+
+ADMC0:	tst.w	d5
+	beq	ADMC04
+	subq.w	#1,d5
+	beq	ADMC02
+	dbra	d3,ADMC01
+	jmp	(a4)
+ADMC01:	lea	22(a1),a1
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,10(a1)
+	swap	d0
+	add.w	d0,(a1)
+	move.l	(a2),d0
+	moveq	#1,d5
+ADMC02:	dbra	d3,ADMC03
+	jmp	(a4)
+ADMC03:	lea	20(a1),a1
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,10(a1)
+	swap	d0
+	add.w	d0,(a1)
+	move.l	(a2),d0
+	lea	22(a1),a1
+	moveq	#0,d5
+ADMC04:	subq.w	#3,d3
+	bcs	ADMC06
+ADMC05:	A2PC0
+	subq.w	#3,d3
+	bcc	ADMC05
+ADMC06:	add.w	d3,d3
+	move.w	ADMC07(pc,d3.w),d3
+	jmp	ADMC07(pc,d3.w)
+	.dc.w	ADMC09-ADMC07,ADMC08-ADMC07,0
+ADMC07:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,10(a1)
+	swap	d0
+	add.w	d0,(a1)
+	move.l	(a2),d0
+	lea	22(a1),a1
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,10(a1)
+	swap	d0
+	add.w	d0,(a1)
+	move.l	(a2),d0
+	moveq	#1,d5
+	jmp	(a4)
+ADMC08:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.w	d0,10(a1)
+	swap	d0
+	add.w	d0,(a1)
+	move.l	(a2),d0
+	moveq	#2,d5
+ADMC09:	jmp	(a4)
+
+	.dc.w	ADMCX-ADMC1
+
+ADMC1:	tst.w	d5
+	beq	ADMC14
+	subq.w	#1,d5
+	beq	ADMC12
+	dbra	d3,ADMC11
+	jmp	(a4)
+ADMC11:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),-42(a1)
+	move.w	2(a2,d1.l),-32(a1)
+	move.l	(a2),d0
+	moveq	#1,d5
+ADMC12:	dbra	d3,ADMC13
+	jmp	(a4)
+ADMC13:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),-22(a1)
+	move.w	2(a2,d1.l),-12(a1)
+	move.l	(a2),d0
+	moveq	#0,d5
+ADMC14:	subq.w	#3,d3
+	bcs	ADMC16
+ADMC15:	A2PC1
+	subq.w	#3,d3
+	bcc	ADMC15
+ADMC16:	add.w	d3,d3
+	move.w	ADMC17(pc,d3.w),d3
+	jmp	ADMC17(pc,d3.w)
+	.dc.w	ADMC19-ADMC17,ADMC18-ADMC17,0
+ADMC17:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.w	d6,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.l	(a2),d0
+	move.w	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	moveq	#1,d5
+	jmp	(a4)
+ADMC18:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.w	2(a2,d1.l),(a1)+
+	move.l	(a2),d0
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	moveq	#2,d5
+ADMC19:	jmp	(a4)
+
+ADMCX1:	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+ADMCX:	subq.w	#3,d3
+	bcc	ADMCX1
+	jmp	(a4)
+
+	.dc.w	ADMD1-ADMD0
+
+ADMD0:	tst.w	d5
+	beq	ADMD04
+	subq.w	#1,d5
+	beq	ADMD02
+	dbra	d3,ADMD01
+	jmp	(a4)
+ADMD01:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.l	d0,(a1)+
+	move.l	(a2),d0
+	moveq	#1,d5
+ADMD02:	dbra	d3,ADMD03
+	jmp	(a4)
+ADMD03:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.l	d0,-2(a1)
+	move.l	(a2),d0
+	addq.l	#2,a1
+	moveq	#0,d5
+ADMD04:	subq.w	#3,d3
+	bcs	ADMD06
+ADMD05:	A2PD0
+	subq.w	#3,d3
+	bcc	ADMD05
+ADMD06:	add.w	d3,d3
+	move.w	ADMD07(pc,d3.w),d3
+	jmp	ADMD07(pc,d3.w)
+	.dc.w	ADMD09-ADMD07,ADMD08-ADMD07,0
+ADMD07:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),d0
+	add.w	2(a2,d1.l),d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	add.l	d0,(a1)+
+	move.l	(a2),d0
+	moveq	#1,d5
+	jmp	(a4)
+ADMD08:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),d0
+	add.w	2(a2,d1.l),d0
+	add.w	d0,(a1)+
+	move.l	(a2),d0
+	moveq	#2,d5
+ADMD09:	jmp	(a4)
+
+	.dc.w	ADMDX-ADMD1
+
+ADMD1:	tst.w	d5
+	beq	ADMD14
+	subq.w	#1,d5
+	beq	ADMD12
+	dbra	d3,ADMD11
+	jmp	(a4)
+ADMD11:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	move.l	d0,-6(a1)
+	move.l	(a2),d0
+	moveq	#1,d5
+ADMD12:	dbra	d3,ADMD13
+	jmp	(a4)
+ADMD13:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),d0
+	move.w	d0,-2(a1)
+	swap	d0
+	add.w	d0,-4(a1)
+	move.l	(a2),d0
+	moveq	#0,d5
+ADMD14:	subq.w	#3,d3
+	bcs	ADMD16
+ADMD15:	A2PD1
+	subq.w	#3,d3
+	bcc	ADMD15
+ADMD16:	add.w	d3,d3
+	move.w	ADMD17(pc,d3.w),d3
+	jmp	ADMD17(pc,d3.w)
+	.dc.w	ADMD19-ADMD17,ADMD18-ADMD17,0
+ADMD17:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),d0
+	add.w	2(a2,d1.l),d0
+	move.w	d0,(a1)+
+	move.l	(a2),d0
+	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.l	(a2,d1.l),(a1)+
+	move.l	(a2),d0
+	move.w	d6,(a1)
+	moveq	#1,d5
+	jmp	(a4)
+ADMD18:	move.b	(a0)+,d0
+	add.w	d0,d0
+	add.w	d0,d0
+	movea.l	d0,a2
+	move.w	(a2,d1.l),d0
+	add.w	2(a2,d1.l),d0
+	move.w	d0,(a1)+
+	move.l	(a2),d0
+	move.w	d6,(a1)+
+	move.l	d6,(a1)+
+	moveq	#2,d5
+ADMD19:	jmp	(a4)
+
+ADMDX1:	move.l	d6,(a1)+
+	move.l	d6,(a1)+
+ADMDX:	subq.w	#3,d3
+	bcc	ADMDX1
+	jmp	(a4)
+
+	.dc.w	P16X1-P16X0
+
+P16X0:	adda.w	d3,a0
+	adda.w	d3,a1
+	jmp	(a4)
+
+	.dc.w	P16XX-P16X1
+
+P16X1:	adda.w	d3,a0
+P16XX:	moveq	#2,d4
+	and.w	d3,d4
+	lsr.w	#2,d3
+	dbra	d3,P16X11
+	bra	P16X12
+P16X11:	move.l	d6,(a1)+
+	dbra	d3,P16X11
+P16X12:	dbra	d4,P16X13
+	jmp	(a4)
+P16X13:	move.w	d6,(a1)+
+	jmp	(a4)
+
+	.dc.w	P08X1-P08X0
+
+P08X0:	adda.w	d3,a0
+	add.w	d3,d3
+	adda.w	d3,a1
+	jmp	(a4)
+
+	.dc.w	P08XX-P08X1
+
+P08X1:	adda.w	d3,a0
+P08XX:	moveq	#1,d4
+	and.w	d3,d4
+	lsr.w	#1,d3
+	dbra	d3,P16X11
+	bra	P16X12
+
+*--------------------------------------------------------------------
+*	これ以降は常駐時のｵﾌﾟｼｮﾝ指定により変化する
+TBLTOP:
+TBLT16:	.dc.b	$40,$41
+	.dc.w	0
+	.dc.w	P1641B-P1641A
+P1641A:	PCMF	9,2
+P1641B:
+
+	.dc.b	$42,$44
+	.dc.w	0
+	.dc.w	P1643B-P1643A
+P1643A:	PCMF	9,1
+P1643B:
+
+	.dc.b	$45,$47
+	.dc.w	0
+	.dc.w	P1646B-P1646A
+P1646A:	PCME	8
+P1646B:
+
+	.dc.b	$48,$49
+	.dc.w	0
+	.dc.w	P1648B-P1648A
+P1648A:	PCMF	8,2
+P1648B:
+
+	.dc.b	$4A,$4B
+	.dc.w	0
+	.dc.w	P164AB-P164AA
+P164AA:	PCMF	8,1
+P164AB:
+
+	.dc.b	$4C,$4E
+	.dc.w	0
+	.dc.w	P164DB-P164DA
+P164DA:	PCME	7
+P164DB:
+
+	.dc.b	$4F,$50
+	.dc.w	0
+	.dc.w	P1650B-P1650A
+P1650A:	PCMF	7,2
+P1650B:
+
+	.dc.b	$51,$53
+	.dc.w	0
+	.dc.w	P1652B-P1652A
+P1652A:	PCMF	7,1
+P1652B:
+
+	.dc.b	$54,$56
+	.dc.w	0
+	.dc.w	P1655B-P1655A
+P1655A:	PCME	6
+P1655B:
+
+	.dc.b	$57,$5A
+	.dc.w	0
+	.dc.w	P1658B-P1658A
+P1658A:	PCMF	6,1
+P1658B:
+
+	.dc.b	$5B,$5C
+	.dc.w	0
+	.dc.w	P165CB-P165CA
+P165CA:	PCME	5
+P165CB:
+
+	.dc.b	$5D,$5E
+	.dc.w	0
+	.dc.w	P165EB-P165EA
+P165EA:	PCMF	5,2
+P165EB:
+
+	.dc.b	$5F,$61
+	.dc.w	0
+	.dc.w	P1660B-P1660A
+P1660A:	PCMF	5,1
+P1660B:
+
+	.dc.b	$62,$63
+	.dc.w	0
+	.dc.w	P1663B-P1663A
+P1663A:	PCME	4
+P1663B:
+
+	.dc.b	$64,$65
+	.dc.w	0
+	.dc.w	P1665B-P1665A
+P1665A:	PCMF	4,2
+P1665B:
+
+	.dc.b	$66,$68
+	.dc.w	0
+	.dc.w	P1667B-P1667A
+P1667A:	PCMF	4,1
+P1667B:
+
+	.dc.b	$69,$6B
+	.dc.w	0
+	.dc.w	P166BB-P166BA
+P166BA:	PCME	3
+P166BB:
+
+	.dc.b	$6C,$6D
+	.dc.w	0
+	.dc.w	P166DB-P166DA
+P166DA:	PCMF	3,2
+P166DB:
+
+	.dc.b	$6E,$6F
+	.dc.w	0
+	.dc.w	P166FB-P166FA
+P166FA:	PCMF	3,1
+P166FB:
+
+	.dc.b	$70,$72
+	.dc.w	0
+	.dc.w	P1671B-P1671A
+P1671A:	PCME	2
+P1671B:
+
+	.dc.b	$73,$74
+	.dc.w	0
+	.dc.w	P1674B-P1674A
+P1674A:	PCMF	2,2
+P1674B:
+
+	.dc.b	$75,$77
+	.dc.w	0
+	.dc.w	P1676B-P1676A
+P1676A:	PCMF	2,1
+P1676B:
+
+	.dc.b	$78,$79
+	.dc.w	0
+	.dc.w	P1679B-P1679A
+P1679A:	PCME	1
+P1679B:
+
+	.dc.b	$7A,$7C
+	.dc.w	0
+	.dc.w	P167BB-P167BA
+P167BA:	PCMF	1,2
+P167BB:
+
+	.dc.b	$7D,$7E
+	.dc.w	0
+	.dc.w	P167DB-P167DA
+P167DA:	PCMF	1,1
+P167DB:
+
+	.dc.b	$7F,$81
+	.dc.w	0
+	.dc.w	P1680B-P1680A
+P1680A:	.dc.w	P1681-P1680
+
+P1680:	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	P16801(pc,d4.w),d4
+	jmp	P16802(pc,d4.w)
+
+P16801:	.dc.b	28,24,20,16,12,8,4,0
+
+P16802:	.rept	7
+	move.w	(a0)+,d0	* 4ﾊﾞｲﾄ
+	add.w	d0,(a1)+
+	.endm
+	dbra	d3,P16803
+	jmp	(a4)
+P16803:	PCM00
+	dbra	d3,P16803
+	jmp	(a4)
+
+	.dc.w	P1681X-P1681
+
+P1681:	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	P16811(pc,d4.w),d4
+	jmp	P16812(pc,d4.w)
+
+P16811:	.dc.b	14,12,10,8,6,4,2,0
+
+P16812:	.rept	7
+	move.w	(a0)+,(a1)+	* 2ﾊﾞｲﾄ
+	.endm
+	dbra	d3,P16813
+	jmp	(a4)
+P16813:	PCM01
+	dbra	d3,P16813
+	jmp	(a4)
+
+P1681X:	lsr.w	#1,d3
+	dbra	d3,P1681Y
+	jmp	(a4)
+P1681Y:	move.w	d5,(a1)+
+	dbra	d3,P1681Y
+	jmp	(a4)
+P1680B:
+
+	.dc.b	$82,$83
+	.dc.w	0
+	.dc.w	P1682B-P1682A
+P1682A:	PCMD	2
+P1682B:
+
+	.dc.b	$84,$85
+	.dc.w	0
+	.dc.w	P1684B-P1684A
+P1684A:	PCMD	1
+P1684B:
+
+	.dc.b	$86,$88
+	.dc.w	0
+	.dc.w	P1687B-P1687A
+P1687A:	PCMA	1
+P1687B:
+
+	.dc.b	$89,$8A
+	.dc.w	0
+	.dc.w	P168AB-P168AA
+P168AA:	.dc.w	P168B-P168A
+
+P168A:	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	P168A1(pc,d4.w),d4
+	jmp	P168A2(pc,d4.w)
+
+P168A1:	.dc.b	96,84,72,60	* PCM50:12ﾊﾞｲﾄ
+	.dc.b	48,36,24,12
+
+P168A2:	.rept	8
+	PCM50
+	.endm
+	dbra	d3,P168A2
+	jmp	(a4)
+
+	.dc.w	P168AX-P168B
+
+P168B:	lsr.w	#1,d3
+	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	P168B1(pc,d4.w),d4
+	jmp	P168B2(pc,d4.w)
+
+P168B1:	.dc.b	96,84,72,60	* PCM51:12ﾊﾞｲﾄ
+	.dc.b	48,36,24,12
+
+P168B2:	.rept	8
+	PCM51
+	.endm
+	dbra	d3,P168B2
+	jmp	(a4)
+
+P168AX:	lsr.w	#1,d3
+	dbra	d3,P168AY
+	jmp	(a4)
+P168AY:	move.w	d0,(a1)+
+	dbra	d3,P168AY
+	jmp	(a4)
+P168AB:
+
+	.dc.b	$8B,$8D
+	.dc.w	0
+	.dc.w	P168CB-P168CA
+P168CA:	PCMB	0
+P168CB:
+
+	.dc.b	$8E,$8F
+	.dc.w	0
+	.dc.w	P168FB-P168FA
+P168FA:	PCMA	2
+P168FB:
+
+	.dc.b	$90,$91
+	.dc.w	0
+	.dc.w	P1691B-P1691A
+P1691A:	PCMC	0
+P1691B:
+
+	.dc.b	$92,$94
+	.dc.w	0
+	.dc.w	P1693B-P1693A
+P1693A:	PCMB	1
+P1693B:
+
+	.dc.b	$95,$97
+	.dc.w	0
+	.dc.w	P1696B-P1696A
+P1696A:	PCMA	3
+P1696B:
+
+	.dc.b	$98,$99
+	.dc.w	0
+	.dc.w	P1698B-P1698A
+P1698A:	PCMC	1
+P1698B:
+
+	.dc.b	$9A,$9B
+	.dc.w	0
+	.dc.w	P169AB-P169AA
+P169AA:	PCMB	2
+P169AB:
+
+	.dc.b	$9C,$9E
+	.dc.w	0
+	.dc.w	P169DB-P169DA
+P169DA:	PCMA	4
+P169DB:
+
+	.dc.b	$9F,$A0
+	.dc.w	0
+	.dc.w	P169FB-P169FA
+P169FA:	PCMC	2
+P169FB:
+	.dc.w	0
+
+TBLT08:	.dc.b	$40,$53
+	.dc.w	0
+	.dc.w	P0840B-P0840A
+P0840A:	.dc.w	P0841-P0840
+
+P0840:	adda.w	d3,a0
+	jmp	(a4)
+
+	.dc.w	P0841X-P0841
+
+P0841:	adda.w	d3,a0
+	dbra	d3,P08411
+	jmp	(a4)
+P08411:	move.w	d6,(a1)+
+	dbra	d3,P08411
+	jmp	(a4)
+
+P0841Y:	move.w	d6,(a1)+
+P0841X:	dbra	d3,P0841Y
+	jmp	(a4)
+P0840B:
+
+	.dc.b	$54,$56
+	.dc.w	0
+	.dc.w	P0855B-P0855A
+P0855A:	PC8E	6
+P0855B:
+
+	.dc.b	$57,$5A
+	.dc.w	$161
+	.dc.w	P0858B-P0858A
+P0858A:	PC8F
+P0858B:
+
+	.dc.b	$5B,$5C
+	.dc.w	0
+	.dc.w	P085CB-P085CA
+P085CA:	PC8E	5
+P085CB:
+
+	.dc.b	$5D,$5E
+	.dc.w	$152
+	.dc.w	P085EB-P085EA
+P085EA:	PC8F
+P085EB:
+
+	.dc.b	$5F,$61
+	.dc.w	$151
+	.dc.w	P0860B-P0860A
+P0860A:	PC8F
+P0860B:
+
+	.dc.b	$62,$63
+	.dc.w	0
+	.dc.w	P0863B-P0863A
+P0863A:	PC8E	4
+P0863B:
+
+	.dc.b	$64,$65
+	.dc.w	$142
+	.dc.w	P0865B-P0865A
+P0865A:	PC8F
+P0865B:
+
+	.dc.b	$66,$68
+	.dc.w	$141
+	.dc.w	P0867B-P0867A
+P0867A:	PC8F
+P0867B:
+
+	.dc.b	$69,$6B
+	.dc.w	0
+	.dc.w	P086BB-P086BA
+P086BA:	PC8E	3
+P086BB:
+
+	.dc.b	$6C,$6D
+	.dc.w	$132
+	.dc.w	P086DB-P086DA
+P086DA:	PC8F
+P086DB:
+
+	.dc.b	$6E,$6F
+	.dc.w	$131
+	.dc.w	P086FB-P086FA
+P086FA:	PC8F
+P086FB:
+
+	.dc.b	$70,$72
+	.dc.w	0
+	.dc.w	P0871B-P0871A
+P0871A:	PC8E	2
+P0871B:
+
+	.dc.b	$73,$74
+	.dc.w	$122
+	.dc.w	P0874B-P0874A
+P0874A:	PC8F
+P0874B:
+
+	.dc.b	$75,$77
+	.dc.w	$121
+	.dc.w	P0876B-P0876A
+P0876A:	PC8F
+P0876B:
+
+	.dc.b	$78,$79
+	.dc.w	0
+	.dc.w	P0879B-P0879A
+P0879A:	PC8E	1
+P0879B:
+
+	.dc.b	$7A,$7C
+	.dc.w	$112
+	.dc.w	P087BB-P087BA
+P087BA:	PC8F
+P087BB:
+
+	.dc.b	$7D,$7E
+	.dc.w	$111
+	.dc.w	P087DB-P087DA
+P087DA:	PC8F
+P087DB:
+
+	.dc.b	$7F,$81
+	.dc.w	0
+	.dc.w	P0880B-P0880A
+P0880A:	.dc.w	P0881-P0880
+
+P0880:	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	P08801(pc,d4.w),d4
+	jmp	P08802(pc,d4.w)
+
+P08801:	.dc.b	48,42,36,30	* PC800:6ﾊﾞｲﾄ
+	.dc.b	24,18,12,6
+
+P08802:	.rept	8
+	PC800
+	.endm
+	dbra	d3,P08802
+	jmp	(a4)
+
+	.dc.w	P0881X-P0881
+
+P0881:	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	P08811(pc,d4.w),d4
+	jmp	P08812(pc,d4.w)
+
+P08811:	.dc.b	48,42,36,30	* PC801:6ﾊﾞｲﾄ
+	.dc.b	24,18,12,6
+
+P08812:	.rept	8
+	PC801
+	.endm
+	dbra	d3,P08812
+	jmp	(a4)
+
+P0881Y:	move.w	d0,(a1)+
+P0881X:	dbra	d3,P0881Y
+	jmp	(a4)
+P0880B:
+
+	.dc.b	$82,$83
+	.dc.w	0
+	.dc.w	P0882B-P0882A
+P0882A:	PC8D	2
+P0882B:
+
+	.dc.b	$84,$85
+	.dc.w	0
+	.dc.w	P0884B-P0884A
+P0884A:	PC8D	1
+P0884B:
+
+	.dc.b	$86,$88
+	.dc.w	0
+	.dc.w	P0887B-P0887A
+P0887A:	PC8A	1
+P0887B:
+
+	.dc.b	$89,$8A
+	.dc.w	0
+	.dc.w	P088AB-P088AA
+P088AA:	.dc.w	P088B-P088A
+
+P088A:	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	P088A1(pc,d4.w),d4
+	jmp	P088A2(pc,d4.w)
+
+P088A1:	.dc.b	112,98,84,70	* PC850:14ﾊﾞｲﾄ
+	.dc.b	56,42,28,14
+
+P088A2:	.rept	8
+	PC850
+	.endm
+	dbra	d3,P088A2
+	jmp	(a4)
+
+	.dc.w	P088BX-P088B
+
+P088B:	moveq	#7,d4
+	and.w	d3,d4
+	lsr.w	#3,d3
+	move.b	P088B1(pc,d4.w),d4
+	jmp	P088B2(pc,d4.w)
+
+P088B1:	.dc.b	112,98,84,70	* PC851:14ﾊﾞｲﾄ
+	.dc.b	56,42,28,14
+
+P088B2:	.rept	8
+	PC851
+	.endm
+	dbra	d3,P088B2
+	jmp	(a4)
+
+P088BY:	move.w	d0,(a1)+
+P088BX:	dbra	d3,P088BY
+	jmp	(a4)
+P088AB:
+
+	.dc.b	$8B,$8D
+	.dc.w	0
+	.dc.w	P088CB-P088CA
+P088CA:	PC8B	0
+P088CB:
+
+	.dc.b	$8E,$8F
+	.dc.w	0
+	.dc.w	P088FB-P088FA
+P088FA:	PC8A	2
+P088FB:
+
+	.dc.b	$90,$91
+	.dc.w	0
+	.dc.w	P0891B-P0891A
+P0891A:	PC8C	0
+P0891B:
+
+	.dc.b	$92,$94
+	.dc.w	0
+	.dc.w	P0893B-P0893A
+P0893A:	PC8B	1
+P0893B:
+
+	.dc.b	$95,$97
+	.dc.w	0
+	.dc.w	P0896B-P0896A
+P0896A:	PC8A	3
+P0896B:
+
+	.dc.b	$98,$99
+	.dc.w	0
+	.dc.w	P0898B-P0898A
+P0898A:	PC8C	1
+P0898B:
+
+	.dc.b	$9A,$9B
+	.dc.w	0
+	.dc.w	P089AB-P089AA
+P089AA:	PC8B	2
+P089AB:
+
+	.dc.b	$9C,$9E
+	.dc.w	0
+	.dc.w	P089DB-P089DA
+P089DA:	PC8A	4
+P089DB:
+
+	.dc.b	$9F,$A0
+	.dc.w	0
+	.dc.w	P089FB-P089FA
+P089FA:	PC8C	2
+P089FB:
+	.dc.w	0
+
+*--------------------------------------------------------------------
+*	ﾜｰｸｴﾘｱ	(長さ可変)
+
+*	.align	16
+*PCMBU1	.dcb.l	PCMBLK,0	* 15.6KHz用ﾊﾞｯﾌｧ
+*PCMBU2	.dcb.l	PCMBLK*4/3,0	* 20.8KHz用ﾊﾞｯﾌｧ
+*PCMBU3	.dcb.l	PCMBLK*2,0	* 31.2KHz用ﾊﾞｯﾌｧ
+*DPCMBF	.dcb.l	PCMBLK,0	* DPCM用ﾊﾞｯﾌｧ
+*ADPBF1	.dcb.b	PCMBLK,PCMSP2	* ADPCM出力ﾊﾞｯﾌｧ1
+*ADPBF2	.dcb.b	PCMBLK,PCMSP2	* ADPCM出力ﾊﾞｯﾌｧ2
+*ADPBFX	.dcb.b	PCMBLK,PCMSPC	* ADPCMﾀﾞﾐｰ出力ﾊﾞｯﾌｧ
+*	.align	16
+*CHNWK	.dcb.b	PCMCHN,0	* チャンネルワーク
+				* ﾊﾞｲﾄ位置	機能
+				*	0	動作ﾓｰﾄﾞ
+				*		ﾋﾞｯﾄ7	動作停止
+				*		    6	初期設定
+				*		    5	IOCS予約中
+				*		    4	IOCSﾓｰﾄﾞで使用中
+				*		    3	IOCS一時停止解除禁止(出力ｷｬﾝｾﾙ)
+				*		  1～0	動作ﾓｰﾄﾞ(0:通常,1:ｱﾚｲﾁｪｰﾝ,2:ﾘﾝｸｱﾚｲﾁｪｰﾝ)
+				*	1	音量
+				*	2	周波数
+				*	3	定位
+				*	4～7	ADPCM→DPCM変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ(ADPCM)
+				*	8～11	音量変換ｵﾌｾｯﾄ(ADPCM)
+				*		音量変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ(PCM)
+				*	12～15	残りﾃﾞｰﾀ長さ
+				*	16～19	ﾃﾞｰﾀﾎﾟｲﾝﾀ
+				*	20～23	処理ﾙｰﾁﾝｱﾄﾞﾚｽ
+				*	24～27	ﾁｪｰﾝﾃｰﾌﾞﾙ残り長さ(ｱﾚｲﾁｪｰﾝﾓｰﾄﾞ)
+				*	28～31	ﾁｪｰﾝﾃｰﾌﾞﾙｱﾄﾞﾚｽ(ｱﾚｲﾁｪｰﾝ,ﾘﾝｸｱﾚｲﾁｪｰﾝﾓｰﾄﾞ)
+
+*	これ以降はﾃｰﾌﾞﾙ領域
+
+*--------------------------------------------------------------------
+*	ｺﾏﾝﾄﾞﾗｲﾝからの実行部
+
+START:	pea	TTLMES(pc)
+	DOS	_PRINT
+	addq.l	#4,sp
+	lea	16(a0),a0
+	move.l	a0,-(sp)
+	move.l	-8(a0),-(sp)
+	lea	WK,a6
+	moveq	#0,d7
+	moveq	#0,d6
+	subq.w	#1,d6
+	move.b	(a2)+,d0
+	beq	CMDSET
+	bsr	OPTGET
+	beq	CMDSET
+	andi.w	#$FF3F,d7
+
+	tst.w	d7
+	bmi	USAGE
+	btst	#14,d7
+	beq	CMDSET
+
+	bsr	KEEPCK			* 常駐解除
+	bmi	ERR8
+	subq.w	#3,d0
+	bcs	ERR5
+	subq.w	#2,d0
+	bcc	ERR5
+	moveq	#$FF,d0
+	trap	#2
+	addq.l	#1,d0
+	beq	ERR7
+	addq.l	#1,d0
+	beq	ERR6
+	moveq	#0,d0
+	lea	RELMES(pc),a0
+	bra	ERRRTN
+
+CMDSET:	bsr	KEEPCK			* 常駐開始
+	bmi	ERR8
+	beq	CMDKEP
+	subq.w	#2,d0
+	bcs	CMDSE1
+	beq	CMDSE5
+	subq.w	#1,d0
+	beq	CMDSE2
+	subq.w	#2,d0
+	bcc	ERR2
+	tst.w	d7			* PCM8が常駐している
+	beq	ERR2
+	bra	CMDSE3
+
+CMDSE1:	movem.l	d6-d7,-(sp)		* 常駐がはずれているので常駐する
+	pea	$0000.w
+	DOS	_SUPER
+	move.l	d0,(sp)
+	jsr	(a0)
+	tst.l	(sp)
+	bmi	CMDSE4
+	DOS	_SUPER
+CMDSE4:	addq.l	#4,sp
+	movem.l	(sp)+,d6-d7
+CMDSE5:	bsr	VCTSET
+	bne	ERR4
+	bsr	PSTOPS
+	move.w	d7,d0
+	beq	NERRTN
+	bra	CMDSE3
+
+CMDSE2:	tst.w	d7			* 常駐済
+	beq	ERR4
+CMDSE3:	bsr	CNGMOD
+	bra	CMDCNG
+
+CMDKEP:	bsr	SYSMOD			* 常駐処理開始
+	lea	LASTAD(pc),a0
+	bsr	SIZCAL
+	adda.l	d0,a0
+	cmpa.l	(sp),a0
+	bhi	ERR3
+	bclr	#0,SYSFLG-WK(a6)
+	bsr	VCTINI
+	bsr	XMOVE
+	bsr	CACCLR
+	lea	CMDKE2(pc),a0
+	adda.l	d0,a0
+	jmp	(a0)
+CMDKE2:	bsr	INIT
+	bsr	PSTOPS
+	bsr	VCTSET
+	bsr	CNGMOD
+	lea	CHKFLG,a0		* 先頭に疑似認識情報を置く
+	lea	TOPADR,a1
+	move.l	(a0)+,(a1)+
+	move.l	(a0)+,(a1)+
+	move.w	#$6000,(a1)+
+	suba.l	a1,a0
+	move.w	a0,(a1)
+	movem.l	(sp)+,a0-a1
+	lea	-$F0(a3),a3
+	suba.l	a1,a3
+	move.w	#0,-(sp)
+	move.l	a3,-(sp)
+	DOS	_KEEPPR
+
+CMDCLR:	lea	CLRMES(pc),a0
+	bra	CMDCN1
+
+CMDCNG:	bclr	#13,d7
+	tst.w	d7
+	beq	CMDCLR
+	lea	CNGMES(pc),a0
+CMDCN1:	moveq	#0,d0
+	bra	ERRRTN
+
+USAGE:	lea	USEMES(pc),a0
+	moveq	#1,d0
+	bra	ERRRTN
+
+ERR2:	lea	KERMES(pc),a0
+	moveq	#2,d0
+	bra	ERRRTN
+
+ERR3:	lea	KEMMES(pc),a0
+	moveq	#3,d0
+	bra	ERRRTN
+
+ERR4:	lea	KRDMES(pc),a0
+	moveq	#4,d0
+	bra	ERRRTN
+
+ERR5:	lea	REXMES(pc),a0
+	moveq	#5,d0
+	bra	ERRRTN
+
+ERR6:	lea	RERMES(pc),a0
+	moveq	#6,d0
+	bra	ERRRTN
+
+ERR7:	lea	RENMES(pc),a0
+	moveq	#7,d0
+	bra	ERRRTN
+
+ERR8:	lea	DERMES(pc),a0
+	moveq	#8,d0
+
+ERRRTN:	move.l	a0,(sp)
+	DOS	_PRINT
+NERRTN:	addq.l	#6,sp
+	move.w	d0,(sp)
+	DOS	_EXIT2
+
+KEEPCK:	move.l	d1,-(sp)		* 常駐ﾁｪｯｸ
+	pea	$0000.w
+	DOS	_SUPER
+	move.l	d0,(sp)
+	bsr	KEPCHK
+	bne	KEEPC1
+	bsr	DKPCHK
+KEEPC1:	move.l	d0,d1
+	tst.l	(sp)
+	bmi	KEEPC2
+	DOS	_SUPER
+KEEPC2:	addq.l	#4,sp
+	move.l	d1,d0
+	movem.l	(sp)+,d1
+	rts
+
+KEPCHK:	move.l	d1,-(sp)		* trap #2 の飛び先ﾁｪｯｸ
+	moveq	#0,d1			* 0:常駐していない
+	lea	T2VECA.w,a0
+	movea.l	(a0),a0
+	cmpa.l	#$00F00000,a0
+	bcc	KEPCHE
+	moveq	#5,d1			* 5:組み込み拒否
+	subq.l	#8,a0
+	move.l	(a0)+,d0
+	cmpi.l	#PCM8OK,d0
+	beq	KEPCH1
+	cmpi.l	#PCM8NG,d0
+	bne	KEPCHE
+	cmpi.l	#'/048',(a0)
+	bne	KEPCHE
+	lea	-12(a0),a0
+	cmpi.l	#PCM8OK,(a0)+
+	bne	KEPCHE
+	cmpi.b	#'A',(a0)
+	bne	KEPCHE
+	moveq	#2,d1			* 2:常駐していない(trap #2 は接続)
+	bra	KEPCHE
+KEPCH1:	cmpi.l	#'/048',(a0)
+	bne	KEPCHE
+	moveq	#4,d1			* 4:他の PCM8 が常駐している
+	lea	-12(a0),a0
+	cmpi.l	#PCM8OK,(a0)+
+	bne	KEPCHE
+	cmpi.b	#'A',(a0)
+	bne	KEPCHE
+	moveq	#3,d1			* 3:常駐済
+KEPCHE:	move.l	d1,d0
+	movem.l	(sp)+,d1
+	rts
+
+DKPCHK:	movem.l	d1-d3/a1-a4,-(sp)	* ﾃﾞﾊﾞｲｽﾄﾞﾗｲﾊﾞ名でﾁｪｯｸ
+	moveq	#-1,d3
+	bsr	NULSRC
+	cmp.l	d3,d0
+	beq	DKPCH5
+	movea.l	d0,a3
+	moveq	#8-1,d0
+	moveq	#2-1,d2
+	lea	DEVNA1(pc),a1
+DKPCH1:	movea.l	a3,a2
+DKPCH2:	move.l	(a2),d1
+	cmp.l	d3,d1
+	beq	DKPCH3
+	movea.l	d1,a2
+	lea	14(a2),a0		* ﾃﾞﾊﾞｲｽ名ﾁｪｯｸ
+	bsr	STRCMP
+	bne	DKPCH2
+	addq.l	#8,a0
+	movem.l	d0/a1,-(sp)		* PCM8A ﾍｯﾀﾞ文字ﾁｪｯｸ
+	lea	HEADD1,a1
+	moveq	#HEADD2-HEADD1-1,d0
+	bsr	STRCMP
+	movem.l	(sp)+,d0/a1
+	bne	DKPCH2
+	movea.l	HEADD2-HEADD1(a0),a2	* trap #2 接続処理ｱﾄﾞﾚｽ
+	moveq	#1,d0			* 1:常駐が外れている
+	bra	DKPCH4
+DKPCH3:	addq.l	#8,a1
+	dbra	d2,DKPCH1
+	moveq	#0,d0			* 0:常駐していない
+DKPCH4:	movea.l	a2,a0
+DKPCH5:	tst.l	d0
+	movem.l	(sp)+,d1-d3/a1-a4
+	rts
+
+NULSRC:	movem.l	d1/a0-a1,-(sp)		* NULL ﾃﾞﾊﾞｲｽのｻｰﾁ
+	moveq	#-1,d1
+	lea	HUTOP-1.w,a0
+	lea	DEVNUL,a1
+NULSR1:	addq.l	#1,a0
+	moveq	#8-2,d0
+	bsr	STRSRC
+	move.l	a0,d0
+	sub.l	a1,d0
+	beq	NULSR2
+	cmpi.w	#$8024,-10(a0)
+	bne	NULSR1
+	lea	-14(a0),a0
+	move.l	a0,d1
+NULSR2:	move.l	d1,d0
+	movem.l	(sp)+,d1/a0-a1
+	rts
+
+STRSRC:	movem.l	d1-d3/a1-a3,-(sp)	* 文字列ｻｰﾁ
+	move.b	(a1)+,d1
+STRSR1:	cmp.b	(a0)+,d1
+	bne	STRSR1
+	movea.l	a1,a3
+	movea.l	a0,a2
+	move.w	d0,d2
+STRSR2:	move.b	(a3)+,d3
+	cmp.b	(a2)+,d3
+	dbne	d2,STRSR2
+	bne	STRSR1
+	subq.l	#1,a0
+	movem.l	(sp)+,d1-d3/a1-a3
+	rts
+
+STRCMP:	movem.l	d0/a0-a1,-(sp)		* 文字列比較
+STRCM1:	move.b	(a1)+,d1
+	cmp.b	(a0)+,d1
+	dbne	d0,STRCM1
+	movem.l	(sp)+,d0/a0-a1
+	rts
+
+XMOVE:	movem.l	d1/a0-a1,-(sp)		* ﾌﾟﾛｸﾞﾗﾑ移動
+	lea	LASTAD(pc),a0
+	bsr	SIZCAL
+	lea	(a0,d0.l),a1
+	move.w	#(LASTAD-TBLTOP)/4,d1
+XMOVE1:	move.l	-(a0),-(a1)
+	dbra	d1,XMOVE1
+	movem.l	(sp)+,d1/a0-a1
+	rts
+
+OPTGET:	movem.l	d1-d3,-(sp)		* ｵﾌﾟｼｮﾝ処理
+OPTGES:	bsr	SPCSKP
+	tst.b	d0
+	beq	OPTGEE
+	cmpi.w	#'/',d0
+	beq	OPTGE1
+	cmpi.w	#'-',d0
+	bne	OPTSW
+OPTGE1:	bsr	CHRGET
+OPTGE0:	tst.b	d0
+	beq	OPTGEE
+	cmpi.w	#' ',d0
+	bls	OPTGES
+	cmpi.w	#'/',d0
+	beq	OPTGE1
+	cmpi.w	#'-',d0
+	beq	OPTGE1
+	bsr	CAPCNG
+	cmpi.w	#'R',d0
+	bne	OPTGE2
+	ori.w	#$4000,d7
+	bra	OPTGE1
+OPTGE2:	cmpi.w	#'D',d0			* 動作表示
+	bne	OPTGE3
+	move.w	#$0C00,d2
+	move.w	#$0800,d3
+	bra	OPTSUB
+OPTGE3:	cmpi.w	#'V',d0			* 音量可変
+	bne	OPTGE4
+	move.w	#$0300,d2
+	move.w	#$0200,d3
+	bra	OPTSUB
+OPTGE4:	cmpi.w	#'I',d0			* IOCSﾁｬﾝﾈﾙ
+	bne	OPTGE5
+	bsr	NUMGET
+	beq	OPTGE0
+	swap	d7
+	move.b	d1,d7
+	swap	d7
+	ori.w	#$0020,d7
+	bra	OPTGE0
+OPTGE5:	cmpi.w	#'N',d0			* ﾃﾞﾊﾞｲｽﾄﾞﾗｲﾊﾞ名
+	bne	OPTGE6
+	move.w	#$00C0,d2
+	move.w	#$0080,d3
+	bra	OPTSUB
+OPTGE6:	cmpi.w	#'S',d0			* ｼｽﾃﾑ情報
+	bne	OPTGE7
+	bsr	NUMGET			* ﾁｬﾝﾈﾙ数
+	beq	OPTGE61
+	rol.l	#8,d6
+	move.b	d1,d6
+	ror.l	#8,d6
+	ori.w	#$1000,d7
+OPTGE61:
+	bsr	SEPCHK
+	bne	OPTGE0
+	bsr	NUMGET			* 処理ﾌﾞﾛｯｸ数
+	beq	OPTGE63
+	swap	d6
+	move.b	d1,d6
+	swap	d6
+	ori.w	#$1000,d7
+OPTGE63:
+	bsr	SEPCHK
+	bne	OPTGE0
+	bsr	NUMGET			* 最小音量
+	beq	OPTGE65
+	move.b	d1,d6
+	ori.w	#$1000,d7
+OPTGE65:
+	bsr	SEPCHK
+	bne	OPTGE0
+	bsr	NUMGET			* 最大音量
+	beq	OPTGE67
+	ror.w	#8,d6
+	move.b	d1,d6
+	rol.w	#8,d6
+	ori.w	#$1000,d7
+OPTGE67:
+	bra	OPTGE0
+OPTGE7:	cmpi.w	#'M',d0			* 周波数ﾓｰﾄﾞ
+	bne	OPTGE8
+	ori.w	#$0008,d7
+	lsl.l	#4,d7
+	bsr	CAPGET
+	cmpi.w	#'0',d0
+	bcs	OPTGE73
+	cmpi.w	#'2',d0
+	bhi	OPTGE71
+	subi.w	#'0',d0
+	add.b	d0,d7
+	bra	OPTGE72
+OPTGE71:
+	cmpi.w	#'A',d0
+	bne	OPTGE73
+	addq.b	#4,d7
+OPTGE72:
+	ror.l	#4,d7
+	bra	OPTGE1
+OPTGE73:
+	addq.b	#3,d7
+	ror.l	#4,d7
+	bra	OPTGE0
+OPTGE8:	cmpi.w	#'F',d0			* 基準周波数
+	bne	OPTGE9
+	ori.w	#$0004,d7
+	rol.l	#8,d7
+	andi.w	#$FFF0,d7
+	bsr	CAPGET
+	cmpi.w	#'0',d0
+	bcs	OPTGE83
+	cmpi.w	#'2',d0
+	bhi	OPTGE81
+	subi.w	#'0',d0
+	add.b	d0,d7
+	bra	OPTGE82
+OPTGE81:
+	cmpi.w	#'A',d0
+	bne	OPTGE83
+	addq.b	#4,d7
+OPTGE82:
+	ror.l	#8,d7
+	bra	OPTGE1
+OPTGE83:
+	addq.b	#3,d7
+	ror.l	#8,d7
+	bra	OPTGE0
+OPTGE9:	tst.b	d0
+	beq	OPTGEE
+OPTGER:	ori.w	#$8000,d7
+OPTGEE:	movem.l	(sp)+,d1-d3
+	tst.w	d7
+	rts
+
+OPTSUB:	or.w	d2,d7
+	bsr	CHRGET
+	cmpi.w	#'0',d0
+	bcs	OPTGE0
+	cmpi.w	#'1',d0
+	bhi	OPTGE0
+	eor.w	d3,d7
+	cmpi.w	#'0',d0
+	beq	OPTGE1
+	eor.w	d2,d7
+	bra	OPTGE1
+
+OPTSW:	bsr	CAPCNG
+	cmpi.w	#'O',d0
+	bne	OPTSW2
+	bsr	CAPGET
+	cmpi.w	#'F',d0
+	bne	OPTSW1
+	bsr	CAPGET
+	cmpi.w	#'F',d0
+	bne	OPTGER
+	andi.w	#$FFFC,d7		* OFF
+	addq.b	#1,d7
+	bra	OPTGES
+OPTSW1:	cmpi.w	#'N',d0
+	bne	OPTGER
+	andi.w	#$FFFC,d7		* ON
+	addq.b	#2,d7
+	bra	OPTGES
+OPTSW2:	cmpi.w	#'F',d0
+	bne	OPTSW3
+	bsr	CAPGET
+	cmpi.w	#'N',d0
+	bne	OPTGER
+	bsr	CAPGET
+	cmpi.w	#'C',d0
+	bne	OPTGER
+	andi.w	#$FFFC,d7		* FNC
+	addq.b	#3,d7
+	bra	OPTGES
+OPTSW3:	cmpi.w	#'C',d0
+	bne	OPTSWE
+	bsr	CAPGET
+	cmpi.w	#'L',d0
+	bne	OPTGER
+	bsr	CAPGET
+	cmpi.w	#'R',d0
+	bne	OPTGER
+	ori.w	#$2000,d7		* CLR
+	bra	OPTGES
+OPTSWE:	tst.b	d0
+	beq	OPTGEE
+	bra	OPTGER
+
+NUMGET:	movem.l	d2-d3,-(sp)		* 数値取り込み
+	moveq	#0,d1
+	moveq	#0,d2
+	bsr	CHRGET
+	beq	NUMGEE
+	cmpi.w	#'0',d0
+	bcs	NUMG20
+	cmpi.w	#'9',d0
+	bhi	NUMG20
+NUMGE1:	addq.w	#1,d2
+	subi.w	#'0',d0
+	ext.l	d0
+	move.l	d1,d3
+	add.l	d1,d1
+	add.l	d1,d1
+	add.l	d3,d1
+	add.l	d1,d1
+	add.l	d0,d1
+	bsr	CHRGET
+	beq	NUMGEE
+	cmpi.w	#'0',d0
+	bcs	NUMGEE
+	cmpi.w	#'9',d0
+	bls	NUMGE1
+NUMGEE:	tst.w	d2
+	movem.l	(sp)+,d2-d3
+	rts
+
+NUMG20:	cmpi.w	#'$',d0
+	beq	NUMG21
+	bsr	CAPCNG
+	cmpi.w	#'X',d0
+	bne	NUMGEE
+NUMG21:	bsr	CAPGET
+	beq	NUMGEE
+	cmpi.w	#'0',d0
+	bcs	NUMGEE
+	cmpi.w	#'9',d0
+	bls	NUMG22
+	cmpi.w	#'A',d0
+	bcs	NUMGEE
+	cmpi.w	#'F',d0
+	bhi	NUMGEE
+	subi.w	#'A'-'9'-1,d0
+NUMG22:	addq.w	#1,d2
+	subi.w	#'0',d0
+	ext.l	d0
+	lsl.l	#4,d1
+	or.l	d0,d1
+	bra	NUMG21
+
+SEPCHK:	cmpi.w	#',',d0
+	beq	SEPCH1
+	cmpi.w	#':',d0
+	beq	SEPCH1
+	cmpi.w	#';',d0
+	beq	SEPCH1
+	cmpi.w	#'.',d0
+SEPCH1:	rts
+
+CAPGET:	bsr	CHRGET
+CAPCNG:	cmpi.w	#'a',d0
+	bcs	CAPCNE
+	cmpi.w	#'z',d0
+	bhi	CAPCNE
+	subi.w	#$20,d0
+CAPCNE:	rts
+
+SPCSKP:	bsr	CHRGET
+SPCSK0:	tst.b	d0
+	beq	SPCSKE
+	cmpi.w	#$20,d0
+	bls	SPCSKP
+SPCSKE:	tst.b	d0
+	rts
+
+CHRGET:	clr.w	d0
+	move.b	(a2)+,d0
+	bpl	CHRGEE
+	cmpi.b	#$A0,d0
+	bcs	CHRGE1
+	cmpi.b	#$E0,d0
+	bcs	CHRGEE
+CHRGE1:	move.b	d0,-(sp)
+	move.w	(sp)+,d0
+	move.b	(a2)+,d0
+CHRGEE:	tst.b	d0
+	rts
+
+*--------------------------------------------------------------------
+*	ﾃﾞﾊﾞｲｽﾄﾞﾗｲﾊﾞ登録時の実行部
+
+DEVSET:	movem.l	d1-d7/a0-a6,-(sp)
+	lea	WK,a6
+	pea	$0000.w
+	move.w	#$6004,DEVINI		* 初期化処理部へ飛ばないようにする
+	movea.l	18(a5),a2
+DEVSE1:	move.b	(a2)+,d0
+	bne	DEVSE1
+	moveq	#0,d7
+	moveq	#0,d6
+	subq.w	#1,d6
+	bra	DEVSE3
+DEVSE2:	bsr	OPTGET
+	btst	#8,d2
+	bne	DEVER1
+DEVSE3:	tst.b	(a2)
+	bne	DEVSE2
+	btst	#8,d2
+	bne	DEVER1
+
+	bsr	KEEPCK
+	bmi	DEVER4
+	beq	DEVSTA
+	subq.w	#2,d0
+	bcs	DEVSE5
+	beq	DEVSE8
+	subq.w	#2,d0
+	bcs	DEVSE6
+	bra	DEVER2
+
+DEVSE5:	jsr	(a0)			* 常駐が外れていた
+DEVSE8:	bsr	VCTSET
+	bne	DEVER3
+	bsr	PSTOPS
+	bsr	CNGMOD
+	btst	#14,d7
+	bne	DEVCNG
+	bra	DEVCN2
+
+DEVSE6:	tst.w	d7			* 常駐済
+	beq	DEVER3
+	bsr	CNGMOD
+	btst	#14,d7
+	bne	DEVSR1
+	bra	DEVCNG
+
+DEVSTA:	bsr	SYSMOD			* 組み込み開始
+	bset	#0,SYSFLG-WK(a6)
+	bsr	VCTINI
+	bsr	XMOVE
+	bsr	CACCLR
+	lea	DEVST3(pc),a0
+	adda.l	d0,a0
+	jmp	(a0)
+DEVST3:	bsr	INIT
+	bsr	PSTOPS
+	bsr	VCTSET
+	move.l	a3,14(a5)
+	bsr	CNGMOD
+	moveq	#0,d1
+	lea	DEVNA1(pc),a1
+	moveq	#$80,d0
+	and.b	d7,d0
+	beq	DEVST4
+	lea	DEVNA2(pc),a1
+DEVST4:	lea	DEVNAM,a0
+	moveq	#8-1,d0
+DEVST5:	move.b	(a1)+,(a0)+
+	dbra	d0,DEVST5
+	bra	DEVCN3
+
+DEVSR1:	addq.l	#1,d0
+	beq	DEVSR2
+	bmi	DEVSR3
+	lea	DOTMES(pc),a0		* 解除
+	bra	DEVCN1
+
+DEVSR2:	lea	RENMES(pc),a0		* 解除禁止
+	bra	DEVCN1
+
+DEVSR3:	lea	DOEMES(pc),a0		* 解除出来ず
+	bra	DEVCN1
+
+DEVER1:	lea	SWEMES(pc),a0		* スイッチ誤り
+	bra	DEVCN1
+
+DEVER2:	lea	DIEMES(pc),a0		* 組込拒否
+	bra	DEVCN1
+
+DEVER3:	lea	DRDMES(pc),a0		* 組込済
+	bra	DEVCN1
+
+DEVER4:	lea	DERMES(pc),a0		* 組込不可
+	bra	DEVCN1
+
+DEVCLR:	lea	CLRMES(pc),a0		* 初期化
+	bra	DEVCN1
+
+DEVCNG:	bclr	#13,d7
+	tst.w	d7
+	beq	DEVCLR
+	lea	CNGMES(pc),a0		* 設定変更
+DEVCN1:	move.l	a0,(sp)
+DEVCN2:	move.w	#$500C,d1
+DEVCN3:	pea	TTLME1(pc)
+DEVCN4:	DOS	_PRINT
+	addq.l	#4,sp
+	tst.l	(sp)
+	beq	DEVSEP
+	DOS	_PRINT
+DEVSEP:	addq.l	#4,sp
+	moveq	#0,d0
+	move.w	d1,d0
+	movem.l	(sp)+,d1-d7/a0-a6
+	rts
+
+*--------------------------------------------------------------------
+*	初期化処理ﾙｰﾁﾝ
+
+PSTOPS:	move.l	d0,-(sp)		* 強制停止
+	move.w	#$0101,d0
+	trap	#2
+	move.w	#$0100,d0
+	trap	#2
+	move.l	(sp)+,d0
+	rts
+
+CACCLR:	movem.l	d0-d1/a1,-(sp)		* ｷｬｯｼｭｸﾘｱ
+	lea	MPUFLG.w,a1
+	IOCS	_B_BPEEK
+	cmpi.b	#2,d0
+	bcs	CACCL1
+	moveq	#3,d1
+	moveq	#$AC,d0
+	trap	#15
+CACCL1:	movem.l	(sp)+,d0-d1/a1
+	rts
+
+SYSMOD:	movem.l	d0-d1,-(sp)		* 常駐時ｼｽﾃﾑ状態設定
+	btst	#12,d7
+	beq	SYSMOE
+	moveq	#0,d0
+	move.b	d6,d0			* 音量最小値
+	cmpi.b	#$FF,d0
+	beq	SYSM12
+	cmpi.b	#15,d0
+	bhi	SYSM11
+	move.b	PCMXT4-WK(a6,d0.w),d0
+SYSM11:	cmpi.b	#VOLMN2,d0
+	bcc	SYSM13
+SYSM12:	move.b	#VOLMN2,d0
+SYSM13:	cmpi.b	#VOLMX2,d0
+	bls	SYSM21
+	move.b	#VOLMX2,d0
+SYSM21:	move.w	d6,d1			* 音量最大値
+	lsr.w	#8,d1
+	cmpi.b	#$FF,d1
+	beq	SYSM24
+	cmpi.b	#15,d1
+	bhi	SYSM22
+	move.b	PCMXT4-WK(a6,d1.w),d1
+SYSM22:	cmpi.b	#VOLMN2,d1
+	bcc	SYSM23
+	move.b	#VOLMN2,d1
+SYSM23:	cmpi.b	#VOLMX2,d1
+	bls	SYSM31
+SYSM24:	move.b	#VOLMX2,d1
+SYSM31:	cmp.b	d0,d1
+	bcc	SYSM32
+	exg	d0,d1
+SYSM32:	movem.w	d0-d1,VOLMIN-WK(a6)
+	cmp.w	VOLMN0-WK(a6),d0
+	bls	SYSM33
+	move.w	d0,VOLMN0-WK(a6)
+SYSM33:	cmp.w	VOLMX0-WK(a6),d1
+	bcc	SYSM34
+	move.w	d1,VOLMX0-WK(a6)
+SYSM34:	swap	d6
+	move.w	d6,d0			* 処理ﾌﾞﾛｯｸ数
+	andi.w	#$00FF,d0
+	bne	SYSM41
+	move.b	#PCMBI2/12,d0
+	bra	SYSM42
+SYSM41:	cmpi.b	#PCMBIX/12,d0
+	bls	SYSM42
+	move.b	#PCMBIX/12,d0
+SYSM42:	move.w	d0,PCMBNX-WK(a6)
+	cmp.w	PCMBN0-WK(a6),d0
+	bcc	SYSM43
+	move.w	d0,PCMBN0-WK(a6)
+	move.w	d0,PCMBN1-WK(a6)
+SYSM43:	move.w	d0,d1
+	add.w	d0,d0
+	add.w	d1,d0
+	lsl.w	#2,d0
+	move.w	d0,PCMBMX-WK(a6)
+	cmp.w	PCMBL0-WK(a6),d0
+	bcc	SYSM44
+	move.w	d0,PCMBL0-WK(a6)
+	move.w	d0,PCMBL1-WK(a6)
+	move.w	d0,PCMBR0-WK(a6)
+	move.w	d0,PCMBR1-WK(a6)
+	move.w	d0,PCMBR2-WK(a6)
+SYSM44:	move.w	d6,d0			* ﾁｬﾝﾈﾙ数
+	lsr.w	#8,d0
+	beq	SYSM51
+	cmpi.b	#PCMCIX,d0
+	bls	SYSM52
+SYSM51:	move.b	#PCMCIX,d0
+SYSM52:	move.w	d0,PCMCMX-WK(a6)
+	cmp.w	PCMCHN-WK(a6),d0
+	bcc	SYSM53
+	move.w	d0,PCMCHN-WK(a6)
+SYSM53:	move.w	PCMCHN-WK(a6),d0	* IOCSﾁｬﾝﾈﾙ数
+	cmp.b	IOCHMX-WK(a6),d0
+	bls	SYSM54
+	move.b	IOCHMX-WK(a6),d0
+SYSM54:	move.b	d0,IOCHN-WK(a6)
+	swap	d6
+SYSMOE:	movem.l	(sp)+,d0-d1
+	rts
+
+CNGMOD:	movem.l	d1/a5-a6,-(sp)		* 設定変更
+	tst.w	d7
+	beq	CNGMOE
+	moveq	#$C,d1
+	and.w	d7,d1
+	beq	CNGM11
+	bsr	CNGFRQ			* 周波数変更
+CNGM11:	move.w	d7,d1			* 動作状況表示
+	andi.w	#$0C00,d1
+	beq	CNGM21
+	rol.w	#6,d1
+	subq.w	#1,d1
+	move.w	#$7F00,d0
+	trap	#2
+CNGM21:	move.w	d7,d1			* 音量可変
+	andi.w	#$0300,d1
+	beq	CNGM31
+	lsr.w	#8,d1
+	subq.w	#1,d1
+	move.w	#$7F04,d0
+	trap	#2
+CNGM31:	btst	#12,d7			* PCM8Aｼｽﾃﾑ情報
+	beq	CNGM41
+	bsr	P8ACHK
+	cmpi.b	#2,d0
+	bcs	CNGM41
+	cmpi.b	#4,d0
+	bcc	CNGM41
+	move.l	d6,d1
+	move.w	#$01F8,d0
+	trap	#2
+CNGM41:	btst	#5,d7			* IOCSﾁｬﾝﾈﾙ数
+	beq	CNGM51
+	move.l	d7,d1
+	swap	d1
+	andi.w	#$00FF,d1
+	move.w	#$7F03,d0
+	trap	#2
+CNGM51:	moveq	#3,d1			* 単音再生ﾓｰﾄﾞ設定
+	and.b	d7,d1
+	beq	CNGM61
+	subq.w	#1,d1
+	move.w	#$7F02,d0
+	trap	#2
+CNGM61:	btst	#13,d7			* 内部初期化
+	beq	CNGM71
+	bsr	P8ACHK
+	cmpi.b	#2,d0
+	bcs	CNGM71
+	cmpi.b	#4,d0
+	bcc	CNGM611
+	moveq	#$F1,d0
+	trap	#2
+	bra	CNGM71
+CNGM611:
+	bne	CNGM71
+	pea	$0000.w
+	DOS	_SUPER
+	move.l	d0,(sp)
+	jsr	DMASTP
+	tst.l	(sp)
+	bmi	CNGM612
+	DOS	_SUPER
+CNGM612:
+	addq.l	#4,sp
+	move.w	#$0101,d0
+	trap	#2
+	move.w	#$0100,d0
+	trap	#2
+CNGM71:	btst	#14,d7			* 組み込み解除
+	beq	CNGMOE
+	moveq	#$FF,d0
+	trap	#2
+CNGMOE:	movem.l	(sp)+,d1/a5-a6
+	rts
+
+CNGFRQ:	movem.l	d0-d3,-(sp)		* 基準周波数変更
+	bsr	P8ACHK
+	cmpi.b	#2,d0
+	bcs	CNGFRE
+	cmpi.b	#4,d0
+	bcc	CNGFRE
+	moveq	#-1,d1
+	move.w	#$01F7,d0
+	trap	#2
+	tst.l	d0
+	bmi	CNGFRE
+	move.w	d0,d3
+	moveq	#0,d1
+	btst	#3,d7
+	bne	CNGF11
+	ror.w	#8,d0
+	move.b	d0,d1
+	rol.w	#8,d0
+	bra	CNGF21
+CNGF11:	moveq	#$F,d1
+	rol.l	#4,d7
+	and.b	d7,d1
+	ror.l	#4,d7
+CNGF21:	moveq	#0,d2
+	btst	#2,d7
+	bne	CNGF22
+	move.b	d0,d2
+	bra	CNGF31
+CNGF22:	moveq	#$F,d2
+	rol.l	#8,d7
+	and.b	d7,d2
+	ror.l	#8,d7
+CNGF31:	cmpi.b	#3,d1
+	bne	CNGF41
+	bsr	ENVCHK			* 環境変数ﾁｪｯｸ
+	move.b	d0,d1
+CNGF41:	cmpi.b	#3,d1
+	bcs	CNGF51
+	bsr	AUTMOD			* 自動判定
+	move.b	d0,d1
+CNGF51:	cmpi.b	#3,d2
+	bcs	CNGF61
+	moveq	#0,d2			* 最大周波数
+	tst.b	d1
+	beq	CNGF61
+	moveq	#2,d2
+CNGF61:	ext.l	d1
+	lsl.w	#8,d1
+	move.b	d2,d1
+	cmp.w	d1,d3
+	beq	CNGFRE
+	move.w	#$01F7,d0
+	trap	#2
+CNGFRE:	movem.l	(sp)+,d0-d3
+	rts
+
+ENVCHK:	movem.l	d1/a1-a2,-(sp)		* 環境変数ﾁｪｯｸ
+	btst	#0,SYSFLG-WK(a6)
+	bne	ENVCER
+	movea.l	#$1800+$53*4,a1
+	IOCS	_B_LPEEK
+	move.l	d0,d1
+	movea.l	#$1800+$83*4,a1
+	IOCS	_B_LPEEK
+	pea	WKBUF(pc)
+	pea	0.w
+	pea	ADPMOD
+	cmp.l	d0,d1
+	beq	ENVC01
+	.dc.w	$FF53
+	bra	ENVC02
+ENVC01:	.dc.w	$FF83
+ENVC02:	lea	12(sp),sp
+	moveq	#0,d1
+	lea	WKBUF(pc),a2
+	bsr	SPCSKP
+	beq	ENVCHE			* なし:MODE0
+	cmpi.w	#'4',d0
+	bne	ENVC21
+	bsr	SPCSKP
+	beq	ENVCHE			* 4:MODE0
+	cmpi.w	#',',d0
+	beq	ENVC11
+	cmpi.w	#'/',d0
+	bne	ENVCER
+ENVC11:	bsr	SPCSKP
+	beq	ENVCER
+	cmpi.w	#'1',d0
+	bne	ENVCER
+	bsr	SPCSKP
+	beq	ENVCER
+	cmpi.w	#'6',d0
+	bne	ENVCER
+	moveq	#2,d1
+	bsr	SPCSKP
+	beq	ENVCHE			* 4/16:MODE2
+	bra	ENVCER
+ENVC21:	cmpi.w	#'1',d0
+	bne	ENVC31
+	bsr	SPCSKP
+	beq	ENVCER
+	cmpi.w	#'6',d0
+	bne	ENVCER
+	moveq	#1,d1
+	bsr	SPCSKP
+	beq	ENVCHE			* 16:MODE1
+	cmpi.w	#',',d0
+	beq	ENVC22
+	cmpi.w	#'/',d0
+	bne	ENVCER
+ENVC22:	bsr	SPCSKP
+	beq	ENVCER
+	cmpi.w	#'4',d0
+	bne	ENVCER
+	moveq	#2,d1
+	bsr	SPCSKP
+	beq	ENVCHE			* 16/4:MODE2
+	bra	ENVCER
+ENVC31:	bsr	CAPCNG
+	moveq	#3,d1
+	cmpi.w	#'A',d0
+	bne	ENVCER
+	bsr	CAPGET
+	beq	ENVCHE			* A:自動判定
+	cmpi.w	#'U',d0
+	bne	ENVCER
+	bsr	CAPGET
+	beq	ENVCHE			* AU:自動判定
+	cmpi.w	#'T',d0
+	bne	ENVCER
+	bsr	CAPGET
+	beq	ENVCHE			* AUT:自動判定
+	cmpi.w	#'O',d0
+	bne	ENVCER
+	bsr	SPCSKP
+	beq	ENVCHE			* AUTO:自動判定
+ENVCER:	moveq	#0,d1
+ENVCHE:	move.l	d1,d0
+	movem.l	(sp)+,d1/a1-a2
+	rts
+
+AUTMOD:	movem.l	d1-d4/a0-a1/a5,-(sp)	* 周波数ﾓｰﾄﾞ自動判定
+	pea	0.w
+	DOS	_SUPER
+	move.l	d0,(sp)
+	moveq	#0,d4
+	lea	WKBUF(pc),a0
+	lea	WKBUFE(pc),a1
+	move.l	a0,d3
+	suba.l	a0,a1
+	move.l	a1,d1
+	moveq	#8,d0
+	dbra	d1,AUTM01
+	bra	AUTM02
+AUTM01:	move.b	d0,(a0)+
+	dbra	d1,AUTM01
+AUTM02:	movea.l	d3,a0
+	lea	DMACH3,a5
+	move.w	sr,d0
+	move.w	d0,-(sp)
+	andi.w	#$0700,d0
+	cmpi.w	#$0300,d0
+	bcc	AUTM10
+	ori.w	#$0300,sr
+AUTM10:	move.w	#$0200,ADIOCS.w
+	moveq	#2,d0			* 15.6KHz:基準用
+	jsr	FRQSE0
+	moveq	#REPT,d2
+	moveq	#0,d0
+AUTM11:	move.l	d0,d1
+	bsr	AUTMSB
+	cmp.l	d0,d1
+	dbeq	d2,AUTM11
+	tst.l	d0
+	beq	AUTMER
+	move.l	d0,d3
+	moveq	#$82,d0			* 31.2KHz:M1/M2,7.8KHz:M0
+	jsr	FRQSE0
+	moveq	#REPT,d2
+	moveq	#0,d0
+AUTM12:	move.l	d0,d1
+	bsr	AUTMSB
+	cmp.l	d0,d1
+	dbeq	d2,AUTM12
+	tst.l	d0
+	beq	AUTMER
+	cmp.l	d3,d0
+	shi	d4
+	add.w	d4,d4
+	moveq	#$81,d0			* 20.8KHz:M1,5.2KHz:M0/M2
+	jsr	FRQSE0
+	moveq	#REPT,d2
+	moveq	#0,d0
+AUTM13:	move.l	d0,d1
+	bsr	AUTMSB
+	cmp.l	d0,d1
+	dbeq	d2,AUTM13
+	tst.l	d0
+	beq	AUTMER
+	cmp.l	d3,d0
+	shi	d4
+	add.w	d4,d4
+	moveq	#$83,d0			* 20.8KHz:M2,7.8KHz:M0/M1
+	jsr	FRQSE0
+	moveq	#REPT,d2
+	moveq	#0,d0
+AUTM14:	move.l	d0,d1
+	bsr	AUTMSB
+	cmp.l	d0,d1
+	dbeq	d2,AUTM14
+	tst.l	d0
+	beq	AUTMER
+	cmp.l	d3,d0
+	shi	d4
+	lsr.w	#7,d4
+	moveq	#0,d1
+	move.b	AUTMTB(pc,d4.w),d1
+	bra	AUTMOE
+AUTMER:	moveq	#0,d1
+AUTMOE:	clr.w	ADIOCS.w
+	move.w	(sp)+,sr
+	tst.l	(sp)
+	bmi	AUTMOX
+	DOS	_SUPER
+AUTMOX:	addq.l	#4,sp
+	move.l	d1,d0
+	movem.l	(sp)+,d1-d4/a0-a1/a5
+	rts
+
+AUTMTB:	.dc.b	0,0,0,0,0,2,1,0
+
+AUTMSB:	movem.l	d1-d3/a0-a1,-(sp)
+	IOCS	_ONTIME
+	move.l	d0,d2
+	moveq	#-1,d3
+AUTMS1:	IOCS	_ONTIME
+	cmp.l	d0,d2
+	dbne	d3,AUTMS1
+	beq	AUTMSE
+	move.l	d0,d2
+	move.b	#1,PCMCNT
+	move.b	#$10,7(a5)
+	st	(a5)
+	move.l	a0,$C(a5)
+	move.w	a1,$A(a5)
+	move.l	#$32808004,d0
+	movep.w	d0,4(a5)
+	swap	d0
+	movep.w	d0,5(a5)
+	move.b	#2,PCMCNT
+	moveq	#-1,d3
+AUTMS2:	IOCS	_ONTIME
+	cmp.l	d0,d2
+	dbne	d3,AUTMS2
+	beq	AUTMSE
+	move.l	$C(a5),d0
+	tst.w	d0
+	bne	AUTMS3
+	move.l	$C(a5),d0
+AUTMS3:	sub.l	a0,d0
+	bra	AUTMSX
+AUTMSE:	moveq	#0,d0
+AUTMSX:	move.b	#1,PCMCNT
+	move.b	#$10,7(a5)
+	st	(a5)
+	movem.l	(sp)+,d1-d3/a0-a1
+	rts
+
+P8ACHK:	move.l	d1,-(sp)		* PCM8Aﾁｪｯｸ
+	pea	$0000.w
+	DOS	_SUPER
+	move.l	d0,(sp)
+	bsr	KEPCHK
+	move.l	d0,d1
+	tst.l	(sp)
+	bmi	P8ACH1
+	DOS	_SUPER
+P8ACH1:	addq.l	#4,sp
+	move.l	d1,d0
+	move.l	(sp)+,d1
+	rts
+
+VCTINI:	movem.l	d0/a1,-(sp)		* trap #2 のみ接続
+	lea	VECTBL-WK(a6),a1
+	move.w	(a1)+,d0
+	move.l	(a1)+,-(sp)
+	move.w	d0,-(sp)
+	DOS	_INTVCS
+	addq.l	#6,sp
+	move.l	d0,(a1)
+	movem.l	(sp)+,d0/a1
+	rts
+
+VCTSET:	moveq	#$FE,d0			* 残りのﾍﾞｸﾀを接続
+	trap	#2
+	tst.l	d0
+	rts
+
+SIZCAL:	movem.l	d1-d4/a0,-(sp)		* ﾜｰｸｴﾘｱ+ﾃｰﾌﾞﾙｴﾘｱｻｲｽﾞ計算(最大値で計算)
+	moveq	#0,d0
+	moveq	#0,d1
+	moveq	#0,d2
+	movem.w	VOLMIN-WK(a6),d3-d4
+	lea	TBLT16(pc),a0
+	bsr	SIZCSB
+	lea	TBLT08(pc),a0
+	bsr	SIZCSB
+	move.w	PCMBNX-WK(a6),d1
+	mulu	#(12*4+16*4+24*4+24*4+24*3),d1
+*		    ↑   ↑   ↑   ↑   ↑ADPCM用ﾊﾞｯﾌｧ*3
+*		    │   │   │   └DPCM用ﾊﾞｯﾌｧ
+*		    │   │   └PCMﾊﾞｯﾌｧ3(31.2KHz用)
+*		    │   └PCMﾊﾞｯﾌｧ2(20.8KHz用)
+*		   PCMﾊﾞｯﾌｧ1(15.6KHz用)
+	add.l	d1,d0
+	move.w	PCMCMX-WK(a6),d1
+	ext.l	d1
+	lsl.w	#5,d1
+	add.l	d1,d0
+	sub.b	d3,d4
+	add.w	#VOLWID+1,d4
+	swap	d4
+	lsr.l	#6,d4
+	add.l	d4,d0
+	add.l	#$10000+(VOLWID+1)*$300+(VOLWID+1)*$400+$400+CACHEL*2,d0
+*		 ↑ADPCM変換	↑ADPCM変換　↑ｵﾌｾｯﾄ情報　↑+α↑
+*		   ﾃｰﾌﾞﾙ2	  ﾃｰﾌﾞﾙ1	ﾃｰﾌﾞﾙ
+	movem.l	(sp)+,d1-d4/a0
+	rts
+
+SIZCSB:	move.w	(a0),d1
+	beq	SIZCS7
+	move.b	d1,d2
+	lsr.w	#8,d1
+	cmp.b	d2,d3
+	bhi	SIZCS5
+	cmp.b	d1,d4
+	bcs	SIZCS5
+	move.w	2(a0),d1
+	clr.b	d1
+	add.l	d1,d0
+	move.w	4(a0),d1
+	add.l	d1,d0
+	bra	SIZCS6
+SIZCS5:	move.w	4(a0),d1
+SIZCS6:	adda.l	d1,a0
+	addq.l	#6,a0
+	bra	SIZCSB
+SIZCS7:	rts
+
+SUBGEN:	movem.l	d0-d5/a0-a2,-(sp)	* 8/16ﾋﾞｯﾄPCMﾙｰﾁﾝ作成
+	movem.w	VOLMIN-WK(a6),d3-d4
+	lea	TBLT16(pc),a0
+	lea	PCMXT2-WK(a6),a1
+	lea	P16X0,a2
+	bsr	SUBGSB
+	lea	TBLT08(pc),a0
+	lea	PCMXT3-WK(a6),a1
+	lea	P08X0,a2
+	bsr	SUBGSB
+	movem.l	(sp)+,d0-d5/a0-a2
+	rts
+
+SUBGSB:	moveq	#VOLMN2,d5
+SUBG10:	move.w	(a0)+,d1
+	beq	SUBG40
+	move.b	d1,d2
+	lsr.w	#8,d1
+	cmp.b	d2,d3
+	bhi	SUBG30
+	cmp.b	d1,d4
+	bcs	SUBG30
+SUBG20:	cmp.b	d1,d5
+	bcc	SUBG21
+	move.l	a2,(a1)+
+	addq.b	#1,d5
+	bra	SUBG20
+SUBG21:	moveq	#2,d0
+	add.l	a3,d0
+SUBG22:	cmp.b	d2,d5
+	bhi	SUBG23
+	move.l	d0,(a1)+
+	addq.b	#1,d5
+	bra	SUBG22
+SUBG23:	move.l	(a0)+,d1
+	dbra	d1,SUBG25
+	bra	SUBG26
+SUBG25:	move.b	(a0)+,(a3)+
+	dbra	d1,SUBG25
+SUBG26:	swap	d1
+	tst.w	d1
+	beq	SUBG10
+	bsr	TBLISB
+	bra	SUBG10
+SUBG30:	move.l	(a0)+,d1
+	adda.w	d1,a0
+	bra	SUBG10
+SUBG40:	cmpi.b	#VOLMX2,d5
+	bhi	SUBGSE
+	move.l	a2,(a1)+
+	addq.b	#1,d5
+	bra	SUBG40
+SUBGSE:	rts
+
+TBLISB:	movem.l	d0-d4,-(sp)		* 8ﾋﾞｯﾄPCM音量変換ﾃｰﾌﾞﾙ作成(256ﾊﾞｲﾄ)
+	move.b	d1,d3
+	lsr.b	#4,d3
+	moveq	#$F,d4
+	and.b	d1,d4
+	moveq	#0,d2
+TBLIS1:	move.b	d2,d0
+	ext.w	d0
+	asl.w	#2,d0
+	bpl	TBLIS2
+	neg.w	d0
+TBLIS2:	asr.w	d3,d0
+	move.w	d0,d1
+	asr.w	d4,d1
+	add.w	d1,d0
+	asr.w	#2,d0
+	tst.b	d2
+	bpl	TBLIS3
+	neg.w	d0
+TBLIS3:	move.b	d0,(a3)+
+	addq.b	#1,d2
+	bcc	TBLIS1
+	movem.l	(sp)+,d0-d4
+	rts
+
+INIT:	lea	TBLTOP,a3		* 各種初期化
+
+	bsr	SUBGEN			* 8/16ﾋﾞｯﾄPCMﾙｰﾁﾝ作成
+
+	lea	CACHEL-1(a3),a3		* ｷｬｯｼｭﾗｲﾝ先頭にｾｯﾄ
+	move.l	a3,d0
+	andi.w	#-CACHEL,d0
+	movea.l	d0,a3
+
+	moveq	#0,d1			* ﾊﾞｯﾌｧｴﾘｱ確保
+	move.l	a3,PCMBU1-WK(a6)
+	move.w	PCMBNX-WK(a6),d2
+	move.w	d2,d0
+	mulu	#12*4,d0
+	bsr	WKINIT
+	move.l	a3,PCMBU2-WK(a6)
+	move.w	d2,d0
+	mulu	#16*4,d0
+	bsr	WKINIT
+	move.l	a3,PCMBU3-WK(a6)
+	move.w	d2,d0
+	mulu	#24*4,d0
+	bsr	WKINIT
+	move.l	a3,DPCMBF-WK(a6)
+	move.w	d2,d0
+	mulu	#24*4,d0
+	bsr	WKINIT
+	move.l	a3,ADPBF1-WK(a6)
+	moveq	#$80,d1
+	move.w	d2,d0
+	mulu	#24,d0
+	move.w	d0,d2
+	bsr	WKINIT
+	move.l	a3,ADPBF2-WK(a6)
+	bsr	WKINIT
+	move.l	a3,ADPBFX-WK(a6)
+	moveq	#PCMSP2,d1
+	moveq	#PCMSPN,d0
+	bsr	WKINIT
+	moveq	#PCMSPC,d1
+	sub.w	d0,d2
+	move.w	d2,d0
+	bsr	WKINIT
+
+	bsr	INISUB			* ﾊﾞｯﾌｧｱﾄﾞﾚｽﾃｰﾌﾞﾙ設定
+
+	lea	CACHEL-1(a3),a3		* ｷｬｯｼｭﾗｲﾝ先頭にｾｯﾄ
+	move.l	a3,d0
+	andi.w	#-CACHEL,d0
+	movea.l	d0,a3
+
+	move.l	a3,CHNWK-WK(a6)		* ﾁｬﾝﾈﾙﾜｰｸ確保
+	move.w	PCMCMX-WK(a6),d0
+	lsl.w	#5,d0
+	adda.w	d0,a3
+
+	movea.l	a3,a0			* DPCM→ADPCM変換ﾃｰﾌﾞﾙ作成
+	adda.l	#$8000,a0
+	move.l	a0,TBLAD3-WK(a6)
+	adda.l	#$8000,a0
+	move.l	a0,TBLAD2-WK(a6)
+	bsr	TBLADP
+
+	lea	$3FF(a3),a3		* 1024ﾊﾞｲﾄ境界にｾｯﾄ
+	move.l	a3,d0
+	andi.w	#$FC00,d0
+	movea.l	d0,a3
+	lsr.w	#2,d0
+	move.l	d0,TBLAD1-WK(a6)
+
+	bsr	TBLGEN			* ADPCM→DPCM変換ﾃｰﾌﾞﾙ作成
+
+	rts
+
+WKINIT:	move.l	d0,-(sp)
+	dbra	d0,WKINI1
+	bra	WKINI2
+WKINI1:	move.b	d1,(a3)+
+	dbra	d0,WKINI1
+WKINI2:	move.l	(sp)+,d0
+	rts
+
+INISUB:	movem.l	d0-d4/a0-a1,-(sp)
+	moveq	#1,d0
+	movem.l	PCMBU1-WK(a6),d1-d4
+	lea	P16X0,a0
+	lea	BYTTB1-WK+4(a6),a1
+INISU1:	move.l	d4,(a1)
+	move.l	d4,8(a1)
+	move.l	d4,8*2(a1)
+	move.l	d4,8*3(a1)
+	move.l	d4,8*4(a1)
+	move.l	d1,8*5(a1)
+	move.l	d1,8*6(a1)
+	move.l	d4,8*7(a1)
+	move.l	d2,8*8(a1)
+	move.l	d2,8*9(a1)
+	move.l	d4,8*10(a1)
+	move.l	d3,8*11(a1)
+	move.l	d3,8*12(a1)
+	move.l	a0,8*13(a1)
+	move.l	a0,8*14(a1)
+	move.l	a0,8*15(a1)
+	lea	BYTTB2-WK+4(a6),a1
+	dbra	d0,INISU1
+	movem.l	(sp)+,d0-d4/a0-a1
+	rts
+
+TBLADP:	movem.l	d0-d7/a0-a2/a4-a6,-(sp)	* DPCM→ADPCM変換ﾃｰﾌﾞﾙ作成
+	lea	DLTTBX(pc),a0		* 65536ﾊﾞｲﾄﾙｯｸｱｯﾌﾟﾃｰﾌﾞﾙ
+	adda.l	#$8000,a3		*	入力	出力
+	movea.l	a3,a2			*	$8000	$FE
+	movea.l	a3,a1			*	 ：	 ：
+	addq.l	#1,a1			*	$FFFF	$80
+	moveq	#0,d0			*	$0000	$00
+	moveq	#0,d3			*	 ：	 ：
+TBLA11:	cmpi.w	#$7C,d0			*	$7FFF	$7E
+	bcs	TBLA12
+	addq.l	#2,a0
+TBLA12:	moveq	#0,d4
+	move.w	(a0)+,d4
+	move.w	d4,d2
+	sub.w	d3,d2
+	subq.w	#1,d2
+	bcs	TBLA14
+	move.w	d0,d1
+	tas	d1
+TBLA13:	move.b	d1,-(a1)
+	move.b	d0,(a3)+
+	dbra	d2,TBLA13
+	addq.b	#2,d0
+TBLA14:	move.w	d4,d3
+	cmpi.b	#$7E,d0
+	bcs	TBLA11
+	move.w	#$7FFF,d4
+	sub.w	d3,d4
+	move.w	d0,d1
+	tas	d1
+TBLA15:	move.b	d1,-(a1)
+	move.b	d0,(a3)+
+	dbra	d4,TBLA15
+	move.b	d1,-(a1)
+
+	lea	DLTTBA(pc),a0		* ADPCM変換ﾃｰﾌﾞﾙ
+	moveq	#0,d7			*	入力	$00～$FE
+TBLA20:	movea.l	a3,a4			*	出力	(1)ADPCMﾃﾞｰﾀ(256ﾊﾞｲﾄ)
+	swap	d7			*		(2)DPCMﾃﾞｰﾀ(256ﾊﾞｲﾄ)
+	lea	DLTTB3(pc),a1		*		(3)次のﾃｰﾌﾞﾙへのｵﾌｾｯﾄ(256ﾊﾞｲﾄ)
+	clr.w	d7			*		ﾃｰﾌﾞﾙは49個(合計768*49=37632ﾊﾞｲﾄ)
+	moveq	#0,d6
+TBLA21:	movem.w	(a1)+,d4-d5
+	mulu	(a0),d4
+	move.w	d4,d3
+	sub.w	(a0),d4
+	lsr.w	#3,d4
+	move.w	d3,d2
+	lsr.w	#4,d2
+	add.w	d2,d3
+	addq.w	#4,d3
+	lsr.w	#3,d3
+	cmpi.w	#$0700,d7
+	bcs	TBLA22
+	move.w	#$80,d2
+	bra	TBLA23
+TBLA22:	moveq	#0,d2
+	move.b	(a2,d3.w),d2
+TBLA23:	move.w	d2,d3
+	sub.w	d6,d2
+	lsr.w	#1,d2
+	subq.w	#1,d2
+	bcs	TBLA27
+	move.w	d7,d0
+	ori.w	#$0880,d0
+	move.w	d4,d1
+	neg.w	d1
+	swap	d7
+	add.w	d7,d5
+	bpl	TBLA24
+	move.w	d7,d5
+TBLA24:	cmpi.w	#VOLWID,d5
+	bls	TBLA25
+	move.w	#VOLWID,d5
+TBLA25:	sub.w	d7,d5
+	swap	d7
+	lsl.w	#8,d5
+	movea.l	a4,a5
+	adda.w	d5,a5
+	add.w	d5,d5
+	adda.w	d5,a5
+TBLA26:	move.w	d7,(a3)
+	move.w	d0,$80(a3)
+	move.w	d4,$100(a3)
+	move.w	d1,$180(a3)
+	movea.l	a5,a6
+	suba.l	a3,a6
+	move.w	a6,$200(a3)
+	lea	-$80(a6),a6
+	move.w	a6,$280(a3)
+	addq.l	#2,a3
+	dbra	d2,TBLA26
+TBLA27:	move.w	d3,d6
+	addi.w	#$0110,d7
+	cmpi.w	#$80,d6
+	bcs	TBLA21
+	lea	$280(a3),a3
+	addq.l	#2,a0
+	swap	d7
+	addq.w	#1,d7
+	cmpi.w	#VOLWID,d7
+	bls	TBLA20
+	movem.l	(sp)+,d0-d7/a0-a2/a4-a6
+	rts
+
+TBLGEN:	movem.l	d0-d6/a0-a2/a4,-(sp)	* ADPCM→DPCM変換ﾃｰﾌﾞﾙ作成
+	lea	DLTTB2(pc),a1		* (1)倍率変化ﾃｰﾌﾞﾙ作成(256*4*49=50176ﾊﾞｲﾄ)
+	moveq	#0,d3			* 現在の倍率を初期化
+TBLG01:	move.l	a3,d5			* 現在のﾃｰﾌﾞﾙの先頭ｱﾄﾞﾚｽを保存
+	moveq	#0,d4
+TBLG02:	move.w	d4,d0			* 下位4ﾋﾞｯﾄのADPCMﾃﾞｰﾀによる倍率の変化量を求める
+	andi.w	#$F,d0
+	add.w	d0,d0
+	move.w	(a1,d0.w),d1
+	add.w	d3,d1			* 範囲制限(0～VOLWID)
+	bpl	TBLG03
+	moveq	#0,d1
+	bra	TBLG04
+TBLG03:	cmpi.w	#VOLWID,d1
+	bls	TBLG04
+	moveq	#VOLWID,d1
+TBLG04:	sub.w	d3,d1
+	move.w	d4,d0			* 上位4ﾋﾞｯﾄのADPCMﾃﾞｰﾀによる倍率の変化量を求める
+	andi.w	#$F0,d0
+	lsr.w	#3,d0
+	add.w	(a1,d0.w),d1
+	add.w	d3,d1			* 範囲制限(0～VOLWID)
+	bpl	TBLG05
+	moveq	#0,d1
+	bra	TBLG06
+TBLG05:	cmpi.w	#VOLWID,d1
+	bls	TBLG06
+	moveq	#VOLWID,d1
+TBLG06:	sub.w	d3,d1
+	swap	d1			* 変化先のｱﾄﾞﾚｽを求める
+	clr.w	d1
+	asr.l	#6,d1
+	add.l	d5,d1
+	lsr.w	#2,d1
+	move.b	d4,d1			* 下位ﾊﾞｲﾄに現在のADPCMﾃﾞｰﾀを入れる(意味無し)
+	move.l	d1,(a3)+
+	addq.b	#1,d4			* 次のADPCMﾃﾞｰﾀ
+	bcc	TBLG02
+	addq.w	#1,d3			* 次の倍率
+	cmpi.w	#VOLWID,d3
+	bls	TBLG01
+	move.l	a3,d5			* (2)DPCMﾃﾞｰﾀ作成,合計256*4*(64+49+32)=148480ﾊﾞｲﾄ
+	lea	DLTTBA(pc),a0		*	(下位4ﾋﾞｯﾄ分)
+	move.w	VOLMIN-WK(a6),d4	* 音量ﾚﾍﾞﾙ初期化
+	subi.w	#VOLOFS,d4
+	move.w	d4,d3
+	add.w	d3,d3
+	adda.w	d3,a0
+	move.w	VOLMAX-WK(a6),d6
+	subi.w	#VOLOFS-VOLWID,d6
+	moveq	#0,d3
+TBLG11:	move.w	(a0)+,d3
+	cmpi.w	#VOLCLP,d4		* 変化量の上限を制限
+	blt	TBLG12
+	subq.l	#2,a0
+TBLG12:	move.l	d3,d2			* 下位4ﾋﾞｯﾄのﾃﾞｰﾀを作成
+	moveq	#8-1,d0
+TBLG13:	cmpi.l	#$3FFFF,d2
+	bls	TBLG14
+	move.l	#$3FFFF,d2
+TBLG14:	ror.l	#3,d2
+	move.w	d2,d1
+	neg.w	d1
+	move.w	d2,(a3)
+	move.w	d1,$20(a3)
+	move.w	d2,$40(a3)
+	move.w	d1,$60(a3)
+	move.w	d2,$80(a3)
+	move.w	d1,$A0(a3)
+	move.w	d2,$C0(a3)
+	move.w	d1,$E0(a3)
+	move.w	d2,$100(a3)
+	move.w	d1,$120(a3)
+	move.w	d2,$140(a3)
+	move.w	d1,$160(a3)
+	move.w	d2,$180(a3)
+	move.w	d1,$1A0(a3)
+	move.w	d2,$1C0(a3)
+	move.w	d1,$1E0(a3)
+	move.w	d2,$200(a3)
+	move.w	d1,$220(a3)
+	move.w	d2,$240(a3)
+	move.w	d1,$260(a3)
+	move.w	d2,$280(a3)
+	move.w	d1,$2A0(a3)
+	move.w	d2,$2C0(a3)
+	move.w	d1,$2E0(a3)
+	move.w	d2,$300(a3)
+	move.w	d1,$320(a3)
+	move.w	d2,$340(a3)
+	move.w	d1,$360(a3)
+	move.w	d2,$380(a3)
+	move.w	d1,$3A0(a3)
+	move.w	d2,$3C0(a3)
+	move.w	d1,$3E0(a3)
+	addq.l	#4,a3
+	rol.l	#3,d2
+	add.l	d3,d2
+	add.l	d3,d2
+	dbra	d0,TBLG13
+	lea	$3E0(a3),a3
+	addq.w	#1,d4
+	cmp.w	d6,d4
+	ble	TBLG11
+	movea.l	d5,a3			* (3)DPCMﾃﾞｰﾀ作成2(上位4ﾋﾞｯﾄ分)
+	movea.l	d5,a0			* ﾃｰﾌﾞﾙの先頭ｱﾄﾞﾚｽに戻す
+	movea.l	a0,a2
+	moveq	#VOLWID,d3
+	add.w	VOLMAX-WK(a6),d3
+	sub.w	VOLMIN-WK(a6),d3
+	swap	d3
+	lsr.l	#6,d3
+	adda.l	d3,a2
+	addq.l	#2,a3
+	move.w	VOLMIN-WK(a6),d4
+	subi.w	#VOLOFS,d4
+TBLG31:	moveq	#0,d3
+TBLG32:	move.b	d3,d0			* 下位4ﾋﾞｯﾄによるﾃﾞｰﾀを求める
+	andi.w	#$F,d0
+	add.w	d0,d0
+	move.w	(a1,d0.w),d0
+	move.w	VOLMIN-WK(a6),d2
+	subi.w	#VOLOFS,d2
+	add.w	d0,d2
+	lsl.w	#8,d0
+	sub.w	d3,d0
+	ext.l	d0
+	lsl.l	#2,d0
+	moveq	#0,d5			* 上位4ﾋﾞｯﾄによるｵﾌｾｯﾄを求める
+	move.b	d3,d5
+	andi.w	#$F0,d5
+	lsr.w	#2,d5
+	add.l	d5,d0
+	moveq	#VOLWID,d1
+	add.w	VOLMAX-WK(a6),d1
+	sub.w	VOLMIN-WK(a6),d1
+	movea.l	a3,a4
+TBLG33:	cmp.w	d4,d2			* 範囲制限(VOLMIN～VOLLIM)
+	blt	TBLG34
+	cmp.w	d6,d2
+	bgt	TBLG35
+	move.w	-2(a4,d0.l),(a4)	* ﾃﾞｰﾀ設定
+	lea	$400(a4),a4
+	addq.w	#1,d2
+	dbra	d1,TBLG33
+	bra	TBLG36
+TBLG34:	move.w	(a0,d5.l),(a4)
+	lea	$400(a4),a4
+	addq.w	#1,d2
+	dbra	d1,TBLG33
+	bra	TBLG36
+TBLG35:	move.w	(a2,d5.l),(a4)
+	lea	$400(a4),a4
+	addq.w	#1,d2
+	dbra	d1,TBLG33
+TBLG36:	addq.l	#4,a3
+	addq.b	#1,d3
+	bcc	TBLG32
+	lea	$400(a2),a3
+	movem.l	(sp)+,d0-d6/a0-a2/a4
+	rts
+
+	.data
+
+*		↓これらの値は 32768/1.1^(80-n) の解の小数点未満を切り捨てたもの
+DLTTB1:	.dc.w	   0,   0,   0,   0,   0,   0,   0,   0		* -64...-57
+	.dc.w	   0,   0,   0,   0,   0,   0,   0,   0		* -56...-49
+	.dc.w	   0,   0,   0,   0,   0,   0,   0,   0		* -48...-41
+	.dc.w	   0,   0,   0,   0,   0,   0,   0,   0		* -40...-33
+	.dc.w	   0,   0,   0,   1,   1,   1,   1,   1		* -32...-25
+	.dc.w	   1,   1,   1,   2,   2,   2,   2,   3		* -24...-17
+	.dc.w	   3,   3					* -16...-15
+DLTTBX:	.dc.w	             4,   4,   5,   5,   6,   6		* -14... -9
+	.dc.w	   7,   8,   9,   9,  10,  12,  13,  14		*  -8... -1
+DLTTBA:	.dc.w	  15,  17,  19,  21,  23,  25,  28,  31		*   0...  7
+	.dc.w	  34,  37,  41,  45,  50,  55,  60,  66		*   8... 15
+	.dc.w	  73,  80,  88,  97, 107, 118, 130, 143		*  16... 23
+	.dc.w	 157, 173, 190, 209, 230, 253, 279, 307		*  24... 31
+	.dc.w	 337, 371, 408, 449, 494, 543, 598, 658		*  32... 39
+	.dc.w	 724, 796, 876, 963,1060,1166,1282,1410		*  40... 47
+	.dc.w	1551,1707,1877,2065,2272,2499,2749,3024		*  48... 55
+	.dc.w	3326,3659,4025,4427,4870,5357,5893,6482		*  56... 63
+	.dc.w	7131,7844,8628,9491,10440,11484,12633,13896	*  64... 71
+	.dc.w	15286,16815,18496,20346,22380,24619,27080,29789	*  72... 79
+
+DLTTB2:	.dc.w	-1,-1,-1,-1, 2, 4, 6, 8
+	.dc.w	-1,-1,-1,-1, 2, 4, 6, 8
+
+DLTTB3:	.dc.w	 2,-1
+	.dc.w	 4,-1
+	.dc.w	 6,-1
+	.dc.w	 8,-1
+	.dc.w	10, 2
+	.dc.w	12, 4
+	.dc.w	14, 6
+	.dc.w	16, 8
+
+TTLME1:	.dc.b	13,10
+TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.51 '			*;version
+	.dc.b	'(c)1993-95 philly',13,10,0
+USEMES:	.dc.b	'使用法：PCM8A [<ｽｲｯﾁ>]',13,10
+	.dc.b	9,'ON',9,': 多重再生ﾓｰﾄﾞ(通常)',13,10
+	.dc.b	9,'OFF',9,': 単音再生ﾓｰﾄﾞ',13,10
+	.dc.b	9,'FNC',9,': IOCSのみ単音再生ﾓｰﾄﾞ',13,10
+	.dc.b	9,'CLR',9,': 全ﾁｬﾝﾈﾙを初期化',13,10
+	.dc.b	9,'-R',9,': 常駐解除',13,10
+	.dc.b	9,'-D[n]',9,': 動作表示 ON/OFF (通常:0)',13,10
+	.dc.b	9,9,'  n = 0:OFF , 1:ON , 省略:ON/OFFの反転',13,10
+	.dc.b	9,'-V[n]',9,': 音量変換 ON/OFF (通常:1)',13,10
+	.dc.b	9,9,'  n = 0:OFF , 1:ON , 省略:ON/OFFの反転',13,10
+	.dc.b	9,'-In',9,': IOCSで使用するﾁｬﾝﾈﾙ数 (通常:8)',13,10
+	.dc.b	9,9,'  n = 0～8 (0:IOCS出力を禁止)',13,10
+*	.dc.b	9,'-M[n]',9,': ADPCMｸﾛｯｸﾓｰﾄﾞ (通常:0)',13,10
+*	.dc.b	9,9,'  n = 0:4M/8M , 1:16M/8M , 2:4M/8M/16M (Hz)',13,10
+*	.dc.b	9,9,'      A:自動判定 , 省略:環境変数(OPM_CT1)参照',13,10
+*	.dc.b	9,9,9,'(n に 1,2 を指定する場合,本体の改造が必要)',13,10
+*	.dc.b	9,'-F[n]',9,': 基準周波数 (通常:0)',13,10
+*	.dc.b	9,9,'  n = 0:15.6K , 1:20.8K , 2:31.2K (Hz)',13,10
+*	.dc.b	9,9,'      省略:最高周波数(-M の指定による)',13,10
+	.dc.b	9,'-S[n1],[n2],[n3],[n4] : ｼｽﾃﾑ状態の設定',13,10
+	.dc.b	9,9,'  n1= ﾁｬﾝﾈﾙ数 (1～16,通常:8)',13,10
+	.dc.b	9,9,'  n2= 処理ﾊﾞｲﾄ数/12 (1～12,通常:4)',13,10
+	.dc.b	9,9,'  n3= 最小音量 (0～8,$40～$80,通常:$40)',13,10
+	.dc.b	9,9,'  n4= 最大音量 (8～15,$80～$A0,通常:$A0)',13,10
+	.dc.b	9,'〈常駐状態での設定変更が可能です〉',13,10
+	.dc.b	0
+
+KERMES:	.dc.b	'《常駐を拒否されました》',13,10,0
+KEMMES:	.dc.b	'《メモリが足りないので常駐できません》',13,10,0
+KRDMES:	.dc.b	'《既に常駐しています》',13,10,0
+REXMES:	.dc.b	'《常駐していません》',13,10,0
+RELMES:	.dc.b	'《常駐を解除しました》',13,10,0
+RERMES:	.dc.b	'《ベクタが変更されているので常駐を解除できません》',13,10,0
+RENMES:	.dc.b	'《解除が禁止されています》',13,10,0
+DIEMES:	.dc.b	'《組み込みを拒否されました》',13,10,0
+DRDMES:	.dc.b	'《既に組み込まれています》',13,10,0
+DOTMES:	.dc.b	'《解除しました》',13,10,0
+DOEMES:	.dc.b	'《ベクタが変更されているので解除できません》',13,10,0
+DERMES:	.dc.b	'《組み込みができません》',13,10,0
+SWEMES:	.dc.b	'《スイッチの指定に誤りがあります》',13,10,0
+CNGMES:	.dc.b	'《設定を変更しました》',13,10,0
+CLRMES:	.dc.b	'《内部を初期化しました》',13,10
+DMYMES:	.dc.b	0
+
+DEVNUL:	.dc.b	'NUL     '		* ﾃﾞﾊﾞｲｽ名
+DEVNA1:	.dc.b	'PCM     '
+DEVNA2:	.dc.b	'@PCM    '
+
+ADPMOD:	.dc.b	'OPM_CT1',0
+
+	.bss
+
+WKBUF:	.ds.b	1024
+WKBUFE:
+	.even
+LASTAD:
+
+	.end	START
+
