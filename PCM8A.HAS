@@ -1,9 +1,9 @@
 *
-*	X68k polyphonic ADPCM driver PCM8A.X v0.58				*;version
+*	X68k polyphonic ADPCM driver PCM8A.X v0.59				*;version
 *		Xellent30ｼﾘｰｽﾞ ﾛｰｶﾙSRAM用ﾜｰｸ分離対応
 *		040turbo 対応 , ﾊｲﾒﾓﾘ常駐対応
-*		ADPCM clock up 暫定対応
-*					philly	1996/2/1
+*		ADPCM clock-up 対応(まだ暫定)
+*					philly	1996/4/18
 *
 *	改造は自由ですが、利用者の混乱を防ぐために、
 *	改造内容をドキュメント等に明記しておいてください。
@@ -1933,7 +1933,7 @@ IOCS673:
 	bra	IOCS3X
 
 IOCS674:
-	moveq	#58,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.58)		*;version
+	moveq	#59,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.59)		*;version
 	bra	IOCS3X
 
 IOCS675:				* 単音再生ﾓｰﾄﾞ/録音時動作制御
@@ -2086,7 +2086,7 @@ CHNSRE:	movem.l	(sp)+,d1-d5/a0-a1
 
 	.dc.w	0,0,0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
 
-	.dc.b	'PCM8A058'		* PCM8A 認識用				*;version
+	.dc.b	'PCM8A059'		* PCM8A 認識用				*;version
 CHKFLG:	.dc.b	'@PCM/048'		* PCM8 認識用
 
 *--------------------------------------------------------------------
@@ -2476,7 +2476,7 @@ T2EX71:	rol.w	#8,d1
 	cmpi.b	#$FF,d1
 	bne	T2EX72
 	move.b	d0,d1
-T2EX72:	cmpi.w	#$300,d1
+T2EX72:	cmpi.w	#$500,d1
 	bcc	T2EX75
 	cmpi.w	#$100,d1
 	bcc	T2EX73
@@ -3584,6 +3584,8 @@ PCMXTB:	.dc.l	ADM40,ADM30,ADM20,ADM10,ADM00,ADM70,ADM80,PCMC30	* 15.6kHz
 FRQTBL:	.dc.b	$80,$81,$00,$01,$02,$40,$40,$40		* -M0
 	.dc.b	$40,$40,$00,$01,$02,$81,$82,$40		* -M1
 	.dc.b	$80,$81,$00,$01,$02,$83,$82,$40		* -M2
+	.dc.b	$80,$81,$00,$01,$02,$03,$83,$40		* -M3
+	.dc.b	$80,$81,$00,$01,$02,$83,$03,$40		* -M4
 
 PCMXT2:	.dcb.l	VOLMX2-VOLMN2+1,0
 
@@ -6812,7 +6814,7 @@ OPTGE7:	cmpi.w	#'M',d0			* 周波数ﾓｰﾄﾞ
 	bsr	CAPGET
 	cmpi.w	#'0',d0
 	bcs	OPTGE73
-	cmpi.w	#'2',d0
+	cmpi.w	#'4',d0
 	bhi	OPTGE71
 	subi.w	#'0',d0
 	add.b	d0,d7
@@ -6820,12 +6822,12 @@ OPTGE7:	cmpi.w	#'M',d0			* 周波数ﾓｰﾄﾞ
 OPTGE71:
 	cmpi.w	#'A',d0
 	bne	OPTGE73
-	addq.b	#4,d7
+	addq.b	#8,d7
 OPTGE72:
 	ror.l	#4,d7
 	bra	OPTGE1
 OPTGE73:
-	addq.b	#3,d7
+	addq.b	#7,d7
 	ror.l	#4,d7
 	bra	OPTGE0
 OPTGE8:	cmpi.w	#'F',d0			* 基準周波数
@@ -7412,11 +7414,11 @@ CNGF22:	moveq	#$F,d2
 	rol.l	#8,d7
 	and.b	d7,d2
 	ror.l	#8,d7
-CNGF31:	cmpi.b	#3,d1
+CNGF31:	cmpi.b	#7,d1
 	bne	CNGF41
 	bsr	ENVCHK			* 環境変数ﾁｪｯｸ
 	move.b	d0,d1
-CNGF41:	cmpi.b	#3,d1
+CNGF41:	cmpi.b	#8,d1
 	bcs	CNGF51
 	bsr	AUTMOD			* 自動判定
 	move.b	d0,d1
@@ -7499,7 +7501,20 @@ ENVC22:	bsr	SPCSKP
 	beq	ENVCHE			* 16/4:MODE2
 	bra	ENVCER
 ENVC31:	bsr	CAPCNG
-	moveq	#3,d1
+	cmpi.w	#'M',d0
+	bne	ENVC41
+	bsr	SPCSKP
+	beq	ENVCER
+	cmpi.w	#'0',d0
+	bcs	ENVCER
+	cmpi.w	#'4',d0
+	bhi	ENVCER
+	subi.w	#'0',d0
+	move.w	d0,d1
+	bsr	SPCSKP
+	beq	ENVCHE			* Mn:MODEn
+	bra	ENVCER
+ENVC41:	moveq	#8,d1
 	cmpi.w	#'A',d0
 	bne	ENVCER
 	bsr	CAPGET
@@ -7522,21 +7537,29 @@ ENVCHE:	move.l	d1,d0
 	rts
 
 AUTMOD:	movem.l	d1-d4/a0-a1/a5,-(sp)	* 周波数ﾓｰﾄﾞ自動判定
+	move.w	#$0103,d0
+	trap	#2
 	pea	0.w
 	DOS	_SUPER
 	move.l	d0,(sp)
-	moveq	#0,d4
+	moveq	#0,d3
 	lea	WKBUF(pc),a0
 	lea	WKBUFE(pc),a1
-	move.l	a0,d3
+	move.l	a0,d2
 	suba.l	a0,a1
 	move.l	a1,d1
-	moveq	#8,d0
+	moveq	#PCMSPC,d0
 	dbra	d1,AUTM01
 	bra	AUTM02
 AUTM01:	move.b	d0,(a0)+
 	dbra	d1,AUTM01
-AUTM02:	movea.l	d3,a0
+AUTM02:	move.l	a0,d0
+	btst	#0,d0
+	beq	AUTM03
+	addq.l	#1,a0
+AUTM03:	move.l	a1,2(a0)
+	move.l	d2,(a0)
+	move.l	a0,6(a0)
 	lea	DMACH3,a5
 	move.w	sr,d0
 	move.w	d0,-(sp)
@@ -7545,58 +7568,48 @@ AUTM02:	movea.l	d3,a0
 	bcc	AUTM10
 	ori.w	#$0300,sr
 AUTM10:	move.w	#$0200,ADIOCS.w
+	moveq	#REPT,d4
 	moveq	#2,d0			* 15.6kHz:基準用
 	jsr	FRQSE0
-	moveq	#REPT,d2
-	moveq	#0,d0
-AUTM11:	move.l	d0,d1
 	bsr	AUTMSB
-	cmp.l	d0,d1
-	dbeq	d2,AUTM11
 	tst.l	d0
 	beq	AUTMER
-	move.l	d0,d3
-	moveq	#$82,d0			* 31.2kHz:M1/M2,7.8kHz:M0
+	move.l	d0,d1
+	move.l	d0,d2
+	lsr.l	#1,d0
+	add.l	d0,d2
+	lsr.l	#1,d0
+	add.l	d0,d1			* D1=D0*5/4
+	add.l	d0,d2			* D2=D0*7/4
+	moveq	#$82,d0			* 31.2kHz:M1/M2,7.8kHz:M0/M3/M4
 	jsr	FRQSE0
-	moveq	#REPT,d2
-	moveq	#0,d0
-AUTM12:	move.l	d0,d1
 	bsr	AUTMSB
-	cmp.l	d0,d1
-	dbeq	d2,AUTM12
 	tst.l	d0
 	beq	AUTMER
-	cmp.l	d3,d0
-	shi	d4
-	add.w	d4,d4
-	moveq	#$81,d0			* 20.8kHz:M1,5.2kHz:M0/M2
+	cmp.l	d1,d0
+	shi	d3
+	add.w	d3,d3
+	moveq	#$81,d0			* 20.8kHz:M1,5.2kHz:M0/M2/M3/M4
 	jsr	FRQSE0
-	moveq	#REPT,d2
-	moveq	#0,d0
-AUTM13:	move.l	d0,d1
 	bsr	AUTMSB
-	cmp.l	d0,d1
-	dbeq	d2,AUTM13
 	tst.l	d0
 	beq	AUTMER
-	cmp.l	d3,d0
-	shi	d4
-	add.w	d4,d4
-	moveq	#$83,d0			* 20.8kHz:M2,7.8kHz:M0/M1
+	cmp.l	d1,d0
+	shi	d3
+	add.w	d3,d3
+	moveq	#$83,d0			* 7.8kHz:M0,20.8kHz:M2/M4,31.2kHz:M1/M3
 	jsr	FRQSE0
-	moveq	#REPT,d2
-	moveq	#0,d0
-AUTM14:	move.l	d0,d1
 	bsr	AUTMSB
-	cmp.l	d0,d1
-	dbeq	d2,AUTM14
 	tst.l	d0
 	beq	AUTMER
-	cmp.l	d3,d0
-	shi	d4
-	lsr.w	#7,d4
+	cmp.l	d1,d0
+	shi	d3
+	add.w	d3,d3
+	cmp.l	d2,d0
+	shi	d3
+	lsr.w	#7,d3
 	moveq	#0,d1
-	move.b	AUTMTB(pc,d4.w),d1
+	move.b	AUTMTB(pc,d3.w),d1
 	bra	AUTMOE
 AUTMER:	moveq	#0,d1
 AUTMOE:	clr.w	ADIOCS.w
@@ -7609,10 +7622,22 @@ AUTMOX:	addq.l	#4,sp
 	movem.l	(sp)+,d1-d4/a0-a1/a5
 	rts
 
-AUTMTB:	.dc.b	0,0,0,0,0,2,1,0
+AUTMTB:	.dc.b	0,0,4,3,0,0,0,0
+	.dc.b	0,0,2,0,0,0,0,1
 
-AUTMSB:	movem.l	d1-d3/a0-a1,-(sp)
-	IOCS	_ONTIME
+AUTMSB:	movem.l	d1-d6/a0-a1,-(sp)
+	move.l	(a0),d5
+	moveq	#0,d6
+	move.b	#1,PCMCNT
+	move.b	#$10,7(a5)
+	st	(a5)
+	move.l	a0,$1C(a5)
+	move.l	#$0E808004,d0
+	movep.w	d0,4(a5)
+	swap	d0
+	movep.w	d0,5(a5)
+	move.b	#2,PCMCNT
+AUTMS0:	IOCS	_ONTIME
 	move.l	d0,d2
 	moveq	#-1,d3
 AUTMS1:	IOCS	_ONTIME
@@ -7620,16 +7645,6 @@ AUTMS1:	IOCS	_ONTIME
 	dbne	d3,AUTMS1
 	beq	AUTMSE
 	move.l	d0,d2
-	move.b	#1,PCMCNT
-	move.b	#$10,7(a5)
-	st	(a5)
-	move.l	a0,$C(a5)
-	move.w	a1,$A(a5)
-	move.l	#$02808004,d0
-	movep.w	d0,4(a5)
-	swap	d0
-	movep.w	d0,5(a5)
-	move.b	#2,PCMCNT
 	moveq	#-1,d3
 AUTMS2:	IOCS	_ONTIME
 	cmp.l	d0,d2
@@ -7637,15 +7652,28 @@ AUTMS2:	IOCS	_ONTIME
 	beq	AUTMSE
 	move.l	$C(a5),d0
 	tst.w	d0
-	bne	AUTMS3
-	move.l	$C(a5),d0
-AUTMS3:	sub.l	a0,d0
-	bra	AUTMSX
+	beq	AUTMS3
+	move.l	(a0),d1
+	cmp.w	d0,d1
+	bne	AUTMS4
+AUTMS3:	move.l	$C(a5),d0
+AUTMS4:	move.l	d0,d2
+	sub.l	d5,d0
+	bcc	AUTMS5
+	moveq	#0,d1
+	move.w	4(a0),d1
+	add.l	d1,d0
+AUTMS5:	move.l	d2,d5
+	cmp.l	d0,d6
+	beq	AUTMSX
+	move.l	d0,d6
+	dbra	d4,AUTMS0
 AUTMSE:	moveq	#0,d0
 AUTMSX:	move.b	#1,PCMCNT
+	move.b	#PCMSP2,PCMDAT
 	move.b	#$10,7(a5)
 	st	(a5)
-	movem.l	(sp)+,d1-d3/a0-a1
+	movem.l	(sp)+,d1-d6/a0-a1
 	rts
 
 P8ACHK:	move.l	d1,-(sp)		* PCM8Aﾁｪｯｸ
@@ -8392,7 +8420,7 @@ DLTTB3:	.dc.w	 2,-1
 	.dc.w	16, 8
 
 TTLME1:	.dc.b	13,10
-TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.58 '			*;version
+TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.59 '			*;version
 	.dc.b	'(c)1993-96 philly',13,10,0
 USEMES:	.dc.b	'使用法：PCM8A [<ｽｲｯﾁ>]',13,10
 	.dc.b	9,'ON',9,': 多重再生ﾓｰﾄﾞ(通常)',13,10
@@ -8449,7 +8477,8 @@ ADPMOD:	.dc.b	'OPM_CT1',0
 	.bss
 
 WKBUF:	.ds.b	1024
-WKBUFE:
+WKBUFE:	.ds.b	10
+
 	.even
 LASTAD:
 
