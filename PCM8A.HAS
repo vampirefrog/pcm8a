@@ -1,8 +1,9 @@
 *
-*	X68k polyphonic ADPCM driver PCM8A.X v0.55				*;version
+*	X68k polyphonic ADPCM driver PCM8A.X v0.56				*;version
 *		Xellent30ｼﾘｰｽﾞ ﾛｰｶﾙSRAM用ﾜｰｸ分離対応
-*		ADPCM clock up & 040turbo 暫定対応
-*					philly	1995/11/19
+*		040turbo 対応
+*		ADPCM clock up 暫定対応
+*					philly	1995/12/12
 *
 *	改造は自由ですが、利用者の混乱を防ぐために、
 *	改造内容をドキュメント等に明記しておいてください。
@@ -69,18 +70,16 @@ PPICTL	equ	$FFE9A007
 *	D1.l	ﾃﾞｰﾀ位置ｵﾌｾｯﾄ(音量変換に使用)	*	音量1段階で1Kﾊﾞｲﾄのﾃｰﾌﾞﾙを使用
 *	(A0)	ADPCMﾃﾞｰﾀ			*
 *	D6.l	0 (定数)			*
-*						*
 * OUT	D0.l	次のﾃｰﾌﾞﾙｱﾄﾞﾚｽ情報		*
 *	A0	+1される			*
 *	(A1)	DPCMﾃﾞｰﾀ , A1は+4される		*
-*						*
 * WORK	D4.l					*
 *	D5.l					*
 *	A2.l					*
 *************************************************
-*	1:1			15.6K <- 15.6K		1
-*				20.8K <- 20.8K		4/3
-*				31.2K <- 31.2K		2
+*	1:1			15.6k <- 15.6k		1
+*				20.8k <- 20.8k		4/3
+*				31.2k <- 31.2k		2
 A2P00	.macro
 	move.b	(a0)+,d0		*	 8	 2
 	add.w	d0,d0			*	 4	 2
@@ -100,8 +99,8 @@ A2P01	.macro				* １回目
 	move.l	(a2),d0			*	12	 2
 	.endm				* 合計	58ｸﾛｯｸ	14ﾊﾞｲﾄ
 
-*	1:2/3			15.6K <- 10.4K		2/3
-*				31.2K <- 20.8K		4/3
+*	1:2/3			15.6k <- 10.4k		2/3
+*				31.2k <- 20.8k		4/3
 A2P10	.macro
 	move.b	(a0)+,d0
 	add.w	d0,d0
@@ -123,9 +122,9 @@ A2P11	.macro
 	move.l	(a2),d0
 	.endm			* 16ﾊﾞｲﾄ
 
-*	1:1/2			15.6K <- 7.8K		1/2
-*				20.8K <- 10.4K		2/3
-*				31.2K <- 15.6K		1
+*	1:1/2			15.6k <- 7.8k		1/2
+*				20.8k <- 10.4k		2/3
+*				31.2k <- 15.6k		1
 A2P20	.macro
 	move.b	(a0)+,d0
 	add.w	d0,d0
@@ -151,8 +150,8 @@ A2P21	.macro
 	move.l	(a2),d0
 	.endm			* 22ﾊﾞｲﾄ
 
-*	1:1/3			15.6K <- 5.2K		1/3
-*				31.2K <- 10.4K		2/3
+*	1:1/3			15.6k <- 5.2k		1/3
+*				31.2k <- 10.4k		2/3
 A2P30	.macro
 	move.b	(a0)+,d0
 	add.w	d0,d0
@@ -178,9 +177,9 @@ A2P31	.macro
 	move.l	(a2),d0
 	.endm			* 22ﾊﾞｲﾄ
 
-*	1:1/4			15.6K <- 3.9K		1/4
-*				20.8K <- 5.2K		1/3
-*				31.2K <- 7.8K		1/2
+*	1:1/4			15.6k <- 3.9k		1/4
+*				20.8k <- 5.2k		1/3
+*				31.2k <- 7.8k		1/2
 A2P40	.macro
 	move.b	(a0)+,d0
 	add.w	d0,d0
@@ -208,7 +207,7 @@ A2P41	.macro
 	move.l	(a2),d0
 	.endm			* 26ﾊﾞｲﾄ
 
-*	1:1/6			31.2K <- 5.2K		1/3
+*	1:1/6			31.2k <- 5.2k		1/3
 A2P50	.macro
 	move.b	(a0)+,d0
 	add.w	d0,d0
@@ -238,7 +237,7 @@ A2P51	.macro
 	move.l	(a2),d0
 	.endm			* 30ﾊﾞｲﾄ
 
-*	1:1/8			31.2K <- 3.9K		1/4
+*	1:1/8			31.2k <- 3.9k		1/4
 A2P60	.macro
 	move.b	(a0)+,d0
 	add.w	d0,d0
@@ -270,7 +269,7 @@ A2P61	.macro
 	move.l	(a2),d0
 	.endm			* 34ﾊﾞｲﾄ
 
-*	1:4/3			15.6K <- 20.8K		2/3
+*	1:4/3			15.6k <- 20.8k		2/3
 A2P70	.macro
 	move.b	(a0)+,d0
 	add.w	d0,d0
@@ -306,7 +305,7 @@ A2P71	.macro
 	move.l	(a2),d0
 	.endm
 
-*	1:2			15.6K <- 31.2K		2
+*	1:2			15.6k <- 31.2k		2
 A2P80	.macro
 	move.b	(a0)+,d0
 	add.w	d0,d0
@@ -329,7 +328,7 @@ A2P81	.macro
 	move.l	(a2),d0
 	.endm			* 20ﾊﾞｲﾄ
 
-*	1:3/4			20.8K <- 15.6K		1/3
+*	1:3/4			20.8k <- 15.6k		1/3
 A2PA0	.macro
 	move.b	(a0)+,d0
 	add.w	d0,d0
@@ -382,7 +381,7 @@ A2PA1	.macro
 	move.l	(a2),d0
 	.endm
 
-*	1:3/8			20.8K <- 7.8K		1/6
+*	1:3/8			20.8k <- 7.8k		1/6
 A2PB0	.macro
 	move.b	(a0)+,d0
 	add.w	d0,d0
@@ -446,7 +445,7 @@ A2PB1	.macro
 	move.l	(a2),d0
 	.endm
 
-*	1:3/16			20.8K <- 3.9K		1/12
+*	1:3/16			20.8k <- 3.9k		1/12
 A2PC0	.macro
 	move.b	(a0)+,d0
 	add.w	d0,d0
@@ -518,7 +517,7 @@ A2PC1	.macro
 	move.l	(a2),d0
 	.endm
 
-*	1:3/2			20.8K <- 31.2K		2/3
+*	1:3/2			20.8k <- 31.2k		2/3
 A2PD0	.macro
 	move.b	(a0)+,d0
 	add.w	d0,d0
@@ -582,13 +581,11 @@ A2PD1	.macro
 *	(A1)	DPCMﾃﾞｰﾀ			*
 *	A2	変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ1			*
 *	A3	変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ2			*
-*						*
 * OUT	D0.w	新しいDPCM誤差			*
 *	D2.b	不定				*
 *	(A0)	ADPCMﾃﾞｰﾀ(A0は+1される)		*
 *	A1	+4される			*
 *	A2	次の変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ1		*
-*						*
 * WORK	D1.w					*
 *************************************************
 
@@ -1938,7 +1935,7 @@ IOCS673:
 	bra	IOCS3X
 
 IOCS674:
-	moveq	#55,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.55)		*;version
+	moveq	#56,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.56)		*;version
 	bra	IOCS3X
 
 IOCS675:				* 単音再生ﾓｰﾄﾞ/録音時動作制御
@@ -2049,35 +2046,35 @@ TIMCAL:	.dc.w	TIMCA0-TIMCAL
 	.dc.w	CHNSR5-TIMCAL
 	.dc.w	CHNSR5-TIMCAL
 
-TIMCA0:	lsl.l	#4,d2			*16:ADPCM(3.9KHz)
+TIMCA0:	lsl.l	#4,d2			*16:ADPCM(3.9kHz)
 	jmp	(a1)			* 256Mﾊﾞｲﾄ以上のADPCMﾃﾞｰﾀだと問題があるが…
 
-TIMCA1:	add.l	d2,d2			*12:ADPCM(5.2KHz)
-TIMCA3:	add.l	d2,d2			*6 :ADPCM(10.4KHz)
-TIMCA7:	move.l	d2,d1			*3 :ADPCM(20.8KHz)
+TIMCA1:	add.l	d2,d2			*12:ADPCM(5.2kHz)
+TIMCA3:	add.l	d2,d2			*6 :ADPCM(10.4kHz)
+TIMCA7:	move.l	d2,d1			*3 :ADPCM(20.8kHz)
 	add.l	d2,d2
 	add.l	d1,d2
 	jmp	(a1)
 
-TIMCA2:	lsl.l	#3,d2			*8 :ADPCM(7.8KHz)
+TIMCA2:	lsl.l	#3,d2			*8 :ADPCM(7.8kHz)
 	jmp	(a1)
 
-TIMCA4:	lsl.l	#2,d2			*4 :ADPCM(15.6KHz)
+TIMCA4:	lsl.l	#2,d2			*4 :ADPCM(15.6kHz)
 	jmp	(a1)
 
-TIMCA8:	lsr.l	#1,d2			*3/4:16bitPCM(20.8KHz)
-TIMCA9:	move.l	d2,d1			*3/2:8bitPCM(20.8KHz)
+TIMCA8:	lsr.l	#1,d2			*3/4:16bitPCM(20.8kHz)
+TIMCA9:	move.l	d2,d1			*3/2:8bitPCM(20.8kHz)
 	lsr.l	#1,d1
 	add.l	d1,d2
 	jmp	(a1)
 
-TIMCAB:	lsr.l	#1,d2			*1/2:16bitPCM(31.2KHz)
+TIMCAB:	lsr.l	#1,d2			*1/2:16bitPCM(31.2kHz)
 	jmp	(a1)
 
-TIMCA6:					*2 :8bitPCM(15.6KHz)
-TIMCAA:	add.l	d2,d2			*2 :ADPCM(31.2KHz)
-TIMCA5:					*1 :16bitPCM(15.6KHz)
-TIMCAC:	cmp.l	d2,d4			*1 :8bitPCM(31.2KHz)
+TIMCA6:					*2 :8bitPCM(15.6kHz)
+TIMCAA:	add.l	d2,d2			*2 :ADPCM(31.2kHz)
+TIMCA5:					*1 :16bitPCM(15.6kHz)
+TIMCAC:	cmp.l	d2,d4			*1 :8bitPCM(31.2kHz)
 	bls	CHNSR4
 	move.l	d2,d4
 	move.w	d0,d5
@@ -2089,9 +2086,9 @@ CHNSR5:	add.b	d3,d0
 CHNSRE:	movem.l	(sp)+,d1-d5/a0-a1
 	rts
 
-	.dc.w	0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
+	.dc.w	0,0,0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
 
-	.dc.b	'PCM8A055'		* PCM8A 認識用				*;version
+	.dc.b	'PCM8A056'		* PCM8A 認識用				*;version
 CHKFLG:	.dc.b	'@PCM/048'		* PCM8 認識用
 
 *--------------------------------------------------------------------
@@ -2202,9 +2199,7 @@ T2ENT33:				* 即座に終了
 	rts
 
 T2ENT34:
-	ori.w	#$0700,sr
-	bsr	DMASTP
-	sf	ADIOCS.w
+	bsr	T2KILL
 	moveq	#0,d0
 	rts
 
@@ -2792,7 +2787,8 @@ T2EX5:	tst.b	KEEPFL-WK(a6)		* $01FF:占有解除
 
 T2ACTV:	move.w	sr,-(sp)		* DMAC/ADPCMを動作状態にする
 	ori.w	#$0700,sr
-	movem.l	d0-d1/a0/a5-a6,-(sp)
+	movem.l	d0-d1/a0/a5,-(sp)
+	st	PANWK-WK(a6)
 	moveq	#0,d1
 	bsr	PANSET
 	bsr	PANCNG
@@ -2804,16 +2800,13 @@ T2ACTV:	move.w	sr,-(sp)		* DMAC/ADPCMを動作状態にする
 	movea.l	ADPBFX-WK(a6),a0
 	moveq	#PCMBGN,d1
 	bsr	DMASTA
-T2ACT1:	movem.l	(sp)+,d0-d1/a0/a5-a6
+T2ACT1:	movem.l	(sp)+,d0-d1/a0/a5
 	move.w	(sp)+,sr
 	rts
 
 T2ACT0:	move.w	sr,-(sp)
 	ori.w	#$0700,sr
-	movem.l	d0-d1/a0/a5-a6,-(sp)
-	moveq	#0,d1
-	bsr	PANSET
-	bsr	PANCNG
+	movem.l	d0-d1/a0/a5,-(sp)
 	lea	DMACH3,a5
 	bsr	DMASP1
 	bsr	T2WCLR
@@ -2852,7 +2845,6 @@ DSPCLR:	tst.b	DSPFLG-WK(a6)
 DSPCL1:	rts
 
 DMASTA:	lea	DMACH3,a5		* DMA転送開始
-	lea	WK(pc),a6
 DMASA0:	move.b	#$01,PCMCNT
 DMASA1:	move.b	#$10,7(a5)
 	st.b	(a5)
@@ -3016,7 +3008,7 @@ T2EXE13:
 T2EXE14:
 	bsr	TBLSET
 T2EXE1Y:
-	movem.l	d1/a0/a5,-(sp)
+	movem.l	d1-d2/a0/a5,-(sp)
 	movea.l	CHNWK-WK(a6),a0
 	moveq	#-1,d1
 	add.w	PCMCHN-WK(a6),d1
@@ -3026,33 +3018,39 @@ T2EXE1A:
 	lea	$20(a0),a0
 	dbeq	d1,T2EXE1A
 	bne	T2EXE1D
+	move.w	#PCM8FL*$100,ADIOCS.w
 	lea	DMACH3,a5
 	movea.l	ADPBFX-WK(a6),a0
-	move.w	sr,d1
-	ori.w	#$0500,sr
-	bset	#3,(a6)
+	move.l	#$02C88004,d1
+	move.w	sr,d2
+	move.w	#$0700,d0
+	and.w	d2,d0
+	cmpi.w	#$0300,d0
+	bcc	T2EXE1B
+	ori.w	#$0300,sr
+T2EXE1B:
+	moveq	#8,d0
+	or.b	d0,(a6)
 	tst.b	ENDFLG-WK(a6)
 	bne	T2EXE1C
-	move.w	#PCM8FL*$100,ADIOCS.w
-	move.l	#$02C88004,d0
 	ori.w	#$0700,sr
-	btst	#3,(a5)
+	and.b	(a5),d0
 	bne	T2EXE1C
+	tas	(a6)
 	move.b	#$10,7(a5)
 	st	(a5)
 	move.l	a0,$C(a5)
 	move.w	#PCMBGN,$A(a5)
 	move.l	a0,$1C(a5)
 	move.w	PCMBR2-WK(a6),$1A(a5)
-	movep.w	d0,4(a5)
-	swap	d0
-	movep.w	d0,5(a5)
+	movep.w	d1,4(a5)
+	swap	d1
+	movep.w	d1,5(a5)
 	move.b	#$02,PCMCNT
-	tas	(a6)
 T2EXE1C:
-	move.w	d1,sr
+	move.w	d2,sr
 T2EXE1D:
-	movem.l	(sp)+,d1/a0/a5
+	movem.l	(sp)+,d1-d2/a0/a5
 T2EXE1E:
 	moveq	#0,d0
 	rts
@@ -3543,7 +3541,7 @@ FRQSE6:	move.w	(sp)+,sr
 FRQSEE:	movem.l	(sp)+,d0-d2/a0
 	rts
 
-*	.dc.w	0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
+	.dc.w	0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
 
 *	処理ﾊﾞｲﾄ数ﾃｰﾌﾞﾙ				  ﾊﾞｲﾄ位置
 BYTTB1:	.dc.l	28*$10000+PCMBI1/4	,0	* 0	: 未使用
@@ -3581,9 +3579,9 @@ BYTTB2:	.dc.l	28*$10000+PCMBI1/4	,0
 	.dc.l	-1			,0
 
 *	処理ｱﾄﾞﾚｽﾃｰﾌﾞﾙ(ADPCM,PCM合成)
-PCMXTB:	.dc.l	ADM40,ADM30,ADM20,ADM10,ADM00,ADM70,ADM80,PCMC30	* 15.6KHz
-	.dc.l	ADMC0,ADM40,ADMB0,ADM20,ADMA0,ADM00,ADMD0,PCMC40	* 20.8KHz
-	.dc.l	ADM60,ADM50,ADM40,ADM30,ADM20,ADM10,ADM00,PCMC50	* 31.2KHz
+PCMXTB:	.dc.l	ADM40,ADM30,ADM20,ADM10,ADM00,ADM70,ADM80,PCMC30	* 15.6kHz
+	.dc.l	ADMC0,ADM40,ADMB0,ADM20,ADMA0,ADM00,ADMD0,PCMC40	* 20.8kHz
+	.dc.l	ADM60,ADM50,ADM40,ADM30,ADM20,ADM10,ADM00,PCMC50	* 31.2kHz
 
 FRQTBL:	.dc.b	$80,$81,$00,$01,$02,$40,$40,$40		* -M0
 	.dc.b	$40,$40,$00,$01,$02,$81,$82,$40		* -M1
@@ -3618,15 +3616,15 @@ VOLMN0:	.dc.w	VOLMN1		* 音量指定最小値
 VOLMX0:	.dc.w	VOLMX1		* 音量指定最大値
 VOLMIN:	.dc.w	VOLMN2		* 音量指定最小値
 VOLMAX:	.dc.w	VOLMX2		* 音量指定最大値
-OUTOF1:	.dc.w	0		* 直前のPCMﾃﾞｰﾀ1:15.6KHz
-OUTOF2:	.dc.w	0		* 直前のPCMﾃﾞｰﾀ2:20.8KHz
-OUTOF3:	.dc.w	0		* 直前のPCMﾃﾞｰﾀ3:31.2KHz
+OUTOF1:	.dc.w	0		* 直前のPCMﾃﾞｰﾀ1:15.6kHz
+OUTOF2:	.dc.w	0		* 直前のPCMﾃﾞｰﾀ2:20.8kHz
+OUTOF3:	.dc.w	0		* 直前のPCMﾃﾞｰﾀ3:31.2kHz
 PCMOFS:	.dc.w	0		* DPCM誤差:変換時D0に入る
 PCMTBL:	.dc.l	0		* DPCM→ADPCM変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ1(ﾜｰｸ):変換時A2に入る
 TBLAD3:	.dc.l	0		* DPCM→ADPCM変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ2:変換時A3に入る
 TBLAD1:	.dc.l	0		* ADPCM→DPCM変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ情報(初期値,ｱﾄﾞﾚｽそのものではない)
 TBLAD2:	.dc.l	0		* DPCM→ADPCM変換ﾃｰﾌﾞﾙｱﾄﾞﾚｽ1(初期値)
-INTWK:	.dc.l	$FBFFDF00	* 割り込みﾚﾍﾞﾙ設定ﾌﾗｸﾞ
+INTWK:	.dc.l	$FBFFDF00	* 割り込みﾚﾍﾞﾙ/ﾏｽｸ
 M1LEN:	.dc.l	0		* 単音再生ﾓｰﾄﾞﾃﾞｰﾀ長さ
 M1ADR:	.dc.l	0		*	〃　　ｱﾄﾞﾚｽ
 INTWK2:	.dc.w	$FDFF		* 割り込みﾏｽｸ中の割り込みﾚﾍﾞﾙ
@@ -3636,10 +3634,10 @@ PANWK2:	.dc.w	$0301		*	〃   2
 PANWK3:	.dc.w	$0301		*	〃   3
 
 FRQMOD:	.dc.b	0		* 周波数切り替えﾓｰﾄﾞ(0:4M/8M,1:16M/8M,2:4M/8M/16M)
-FRQSEL:	.dc.b	0		* 基準周波数(0:15.6K,1:20.3K,2:31.2K)
-PCMBU1:	.dc.l	0		* 15.6KHz PCM用ﾊﾞｯﾌｧｱﾄﾞﾚｽ
-PCMBU2:	.dc.l	0		* 20.8KHz PCM用ﾊﾞｯﾌｧｱﾄﾞﾚｽ
-PCMBU3:	.dc.l	0		* 31.2KHz PCM用ﾊﾞｯﾌｧｱﾄﾞﾚｽ
+FRQSEL:	.dc.b	0		* 基準周波数(0:15.6k,1:20.8k,2:31.2k)
+PCMBU1:	.dc.l	0		* 15.6kHz PCM用ﾊﾞｯﾌｧｱﾄﾞﾚｽ
+PCMBU2:	.dc.l	0		* 20.8kHz PCM用ﾊﾞｯﾌｧｱﾄﾞﾚｽ
+PCMBU3:	.dc.l	0		* 31.2kHz PCM用ﾊﾞｯﾌｧｱﾄﾞﾚｽ
 DPCMBF:	.dc.l	0		* DPCMﾊﾞｯﾌｧｱﾄﾞﾚｽ
 ADPBF1:	.dc.l	0		* ADPCMﾊﾞｯﾌｧ1ｱﾄﾞﾚｽ
 ADPBF2:	.dc.l	0		*      〃   2  〃
@@ -3679,7 +3677,7 @@ SYSFLG:	.dc.b	0		* ｼｽﾃﾑ状態ﾌﾗｸﾞ
 				*	2	音量固定ﾓｰﾄﾞ(trap #2 設定)
 				*	1	音量固定ﾓｰﾄﾞ(ｺﾏﾝﾄﾞﾗｲﾝ設定)
 				*	0	ﾃﾞﾊﾞｲｽﾄﾞﾗｲﾊﾞﾓｰﾄﾞ
-PANWK:	.dc.b	$FF		* 定位(0～3)
+PANWK:	.dc.b	0		* 定位(0～3)
 TRYWK:	.dc.b	0		* 過負荷ﾘﾄﾗｲｶｳﾝﾀ
 M1MOD:	.dc.b	0		* 単音再生ﾓｰﾄﾞﾌﾗｸﾞ(0:ﾁｪｰﾝ無し,1:ｱﾚｲﾁｪｰﾝ,2:ﾘﾝｸｱﾚｲﾁｪｰﾝ)
 IOFLG:	.dc.b	0		* IOCS一時停止ﾌﾗｸﾞ
@@ -3724,6 +3722,32 @@ WKADF5:	.dc.w	0		* ADPCM→PCM変換ﾃｰﾌﾞﾙ分離ﾌﾗｸﾞ
 WKADR5:	.dc.l	-2,-2		*         〃         先頭ｱﾄﾞﾚｽ
 
 *--------------------------------------------------------------------
+
+*	.dc.w	0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
+
+INTOP2:	move.b	#$01,PCMCNT
+	sf	ADIOCS.w
+	movea.l	(sp)+,a5
+	rte
+
+INTOP1:	btst	#2,ADIOCS.w
+	bne	INTOP2
+	move.b	#PCMSP1,PCMDAT		* 終了
+	movea.l	(sp)+,a5
+	rte
+
+INTOPR:	move.l	a5,-(sp)		* 多重割り込み対策
+	lea	DMACH3,a5
+	move.b	(a5),(a5)
+	bmi	INTOP1
+	movea.l	(sp)+,a5
+	rte
+
+DISPON:	move.w	#DCOL1,TXTPL0		* 動作状態表示ON
+	bra	INTEXA
+
+	.dc.w	0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
+
 *	割り込み処理ｴﾝﾄﾘ	(ｴﾗｰ時と共通)
 
 INTEXE:	ori.w	#$0700,sr
@@ -3731,13 +3755,13 @@ INTEXE:	ori.w	#$0700,sr
 	bne	INTOPR
 	movem.l	d5-d7/a5-a6,-(sp)
 	lea	WK(pc),a6
-	lea	MFPIMA,a5
-	movep.w	0(a5),d7		* 割り込みﾏｽｸ
-	move.b	DMACH3-MFPIMA(a5),d5
+	lea	DMACH3,a5
+	movep.w	MFPIMA-DMACH3(a5),d7	* 割り込みﾏｽｸ
 	move.w	INTWK+2-WK(a6),d5
 	and.w	d7,d5
 	eor.w	d5,d7
-	movep.w	d5,0(a5)
+	movep.w	d5,MFPIMA-DMACH3(a5)
+	tst.b	(a5)
 	move.w	sr,d6
 	move.w	d6,d5
 	and.w	INTWK2-WK(a6),d5
@@ -3749,7 +3773,6 @@ INTEXA:
 	move.w	d7,-(sp)
 	movem.l	d0-d4/a0-a4,-(sp)
 	movem.w	d5-d6,-(sp)
-	lea	DMACH3-MFPIMA(a5),a5
 
 	cmpi.b	#PCM8FL,ADIOCS.w
 	bne	IN0000
@@ -3896,14 +3919,14 @@ INT120:
 INT999:	move.w	(sp)+,sr
 	move.w	(sp)+,d6
 	movem.l	(sp)+,d0-d4/a0-a4
-	lea	MFPIMA,a5
+	move.w	(sp)+,d7
 	sf	TRYWK-WK(a6)
-	move.w	d6,sr
 	sf	ENDFLG-WK(a6)
-	movep.w	0(a5),d6		* ┐
-	move.b	DMACH3-MFPIMA(a5),d5	* │X68030では、2つのmovepの間に幾つか命令を挟んで、
-	or.w	(sp)+,d6		* │時間かせぎをしないと、うまく書き込めない事がある
-	movep.w	d6,0(a5)		* ┘
+	lea	MFPIMA,a5
+	move.w	d6,sr
+	movep.w	0(a5),d6
+	or.w	d7,d6
+	movep.w	d6,0(a5)
 	tst.b	(sp)+
 	movem.l	(sp)+,d5-d7/a5-a6
 	bmi	DISPOF
@@ -3912,31 +3935,10 @@ INT999:	move.w	(sp)+,sr
 INT991:	st	(a5)
 	bra	INT999
 
-DISPON:	move.w	#DCOL1,TXTPL0		* 動作状態表示ON
-	bra	INTEXA
-
 DISP81:	move.w	#DCOL2,TXTPL0		* 動作状態表示色変更
 	bra	INTEXC
 
 DISPOF:	move.w	#DCOL0,TXTPL0		* 動作状態表示OFF
-	rte
-
-INTOPR:	move.l	a5,-(sp)		* 多重割り込み対策
-	lea	DMACH3,a5
-	move.b	(a5),(a5)
-	bmi	INTOP1
-	movea.l	(sp)+,a5
-	rte
-
-INTOP1:	btst	#2,ADIOCS.w
-	bne	INTOP2
-	move.b	#PCMSP1,PCMDAT		* 終了
-	movea.l	(sp)+,a5
-	rte
-
-INTOP2:	move.b	#$01,PCMCNT
-	sf	ADIOCS.w
-	movea.l	(sp)+,a5
 	rte
 
 INTCNT:	st	(a5)			* 終了時1回ｵｰﾊﾞｰﾗﾝ
@@ -4212,13 +4214,13 @@ PCMC25:	movea.l	(sp)+,a1
 PCMC3:	movea.l	DPCMBF-WK(a6),a5	* 8/16ﾋﾞｯﾄPCMの合成
 	move.w	PCMBL1-WK(a6),d6
 	movea.l	EXEPTR-WK(a6),a0
-	movea.l	4*7(a0),a0		* PCMC30(15.6K),PCMC40(20.8K),PCMC50(31.2K)
+	movea.l	4*7(a0),a0		* PCMC30(15.6k),PCMC40(20.8k),PCMC50(31.2k)
 	jmp	(a0)
 
-PCMC30:	lsr.w	#2,d6			* 15.6Kへ合成
+PCMC30:	lsr.w	#2,d6			* 15.6kへ合成
 	btst	#12,d7			* DPCMﾊﾞｯﾌｧにﾃﾞｰﾀがあるか?
 	bne	PCMC341
-	add.w	d7,d7			* 31.2Kのﾃﾞｰﾀがあるか?
+	add.w	d7,d7			* 31.2kのﾃﾞｰﾀがあるか?
 	bcc	PCMC321
 	movea.l	a5,a1
 	movea.l	PCMBU3-WK(a6),a0
@@ -4241,7 +4243,7 @@ PCMC312:
 	dbra	d5,PCMC312
 	bra	PCMC343
 PCMC321:
-	add.w	d7,d7			* 20.8Kのﾃﾞｰﾀがあるか?
+	add.w	d7,d7			* 20.8kのﾃﾞｰﾀがあるか?
 	bcc	PCMC331
 	movea.l	a5,a1
 	movea.l	PCMBU2-WK(a6),a0
@@ -4274,7 +4276,7 @@ PCMC322:
 	bcc	PCMC322
 	bra	PCMC353
 PCMC331:
-	movea.l	a5,a1			* 15.6Kのﾃﾞｰﾀの処理
+	movea.l	a5,a1			* 15.6kのﾃﾞｰﾀの処理
 	movea.l	PCMBU1-WK(a6),a0
 	move.w	OUTOF1-WK(a6),d0
 	move.w	d6,d5
@@ -4291,7 +4293,7 @@ PCMC332:
 	dbra	d5,PCMC332
 	bra	PCMC363
 PCMC341:				* 前のﾃﾞｰﾀに加算する場合の処理
-	add.w	d7,d7			* 31.2Kのﾃﾞｰﾀがあるか?
+	add.w	d7,d7			* 31.2kのﾃﾞｰﾀがあるか?
 	bcc	PCMC351
 	movea.l	a5,a1
 	movea.l	PCMBU3-WK(a6),a0
@@ -4315,7 +4317,7 @@ PCMC342:
 PCMC343:
 	move.w	d0,OUTOF3-WK(a6)
 PCMC351:
-	add.w	d7,d7			* 20.8Kのﾃﾞｰﾀがあるか?
+	add.w	d7,d7			* 20.8kのﾃﾞｰﾀがあるか?
 	bcc	PCMC361
 	movea.l	a5,a1
 	movea.l	PCMBU2-WK(a6),a0
@@ -4349,7 +4351,7 @@ PCMC352:
 PCMC353:
 	move.w	d4,OUTOF2-WK(a6)
 PCMC361:
-	add.w	d7,d7			* 15.6Kのﾃﾞｰﾀがあるか?
+	add.w	d7,d7			* 15.6kのﾃﾞｰﾀがあるか?
 	bcc	PCMC3X
 	movea.l	a5,a1
 	movea.l	PCMBU1-WK(a6),a0
@@ -4374,7 +4376,7 @@ PCMC3X:	swap	d7
 	move.b	(sp)+,d6
 	rts
 
-PCMC40:	btst	#12,d7			* 20.8Kへ合成
+PCMC40:	btst	#12,d7			* 20.8kへ合成
 	bne	PCMC441
 	add.w	d7,d7
 	bcc	PCMC421
@@ -4549,7 +4551,7 @@ PCMC4X:	swap	d7
 	move.b	(sp)+,d6
 	rts
 
-PCMC50:	lsr.w	#1,d6			* 31.2Kへ合成
+PCMC50:	lsr.w	#1,d6			* 31.2kへ合成
 	moveq	#0,d4
 	btst	#12,d7
 	bne	PCMC541
@@ -6358,9 +6360,9 @@ P089FB:
 *	ﾜｰｸｴﾘｱ	(長さ可変)
 
 *	.align	16
-*PCMBU1	.dcb.l	PCMBLK,0	* 15.6KHz用ﾊﾞｯﾌｧ
-*PCMBU2	.dcb.l	PCMBLK*4/3,0	* 20.8KHz用ﾊﾞｯﾌｧ
-*PCMBU3	.dcb.l	PCMBLK*2,0	* 31.2KHz用ﾊﾞｯﾌｧ
+*PCMBU1	.dcb.l	PCMBLK,0	* 15.6kHz用ﾊﾞｯﾌｧ
+*PCMBU2	.dcb.l	PCMBLK*4/3,0	* 20.8kHz用ﾊﾞｯﾌｧ
+*PCMBU3	.dcb.l	PCMBLK*2,0	* 31.2kHz用ﾊﾞｯﾌｧ
 *DPCMBF	.dcb.l	PCMBLK,0	* DPCM用ﾊﾞｯﾌｧ
 *ADPBF1	.dcb.b	PCMBLK,PCMSP2	* ADPCM出力ﾊﾞｯﾌｧ1
 *ADPBF2	.dcb.b	PCMBLK,PCMSP2	* ADPCM出力ﾊﾞｯﾌｧ2
@@ -7545,7 +7547,7 @@ AUTM02:	movea.l	d3,a0
 	bcc	AUTM10
 	ori.w	#$0300,sr
 AUTM10:	move.w	#$0200,ADIOCS.w
-	moveq	#2,d0			* 15.6KHz:基準用
+	moveq	#2,d0			* 15.6kHz:基準用
 	jsr	FRQSE0
 	moveq	#REPT,d2
 	moveq	#0,d0
@@ -7556,7 +7558,7 @@ AUTM11:	move.l	d0,d1
 	tst.l	d0
 	beq	AUTMER
 	move.l	d0,d3
-	moveq	#$82,d0			* 31.2KHz:M1/M2,7.8KHz:M0
+	moveq	#$82,d0			* 31.2kHz:M1/M2,7.8kHz:M0
 	jsr	FRQSE0
 	moveq	#REPT,d2
 	moveq	#0,d0
@@ -7569,7 +7571,7 @@ AUTM12:	move.l	d0,d1
 	cmp.l	d3,d0
 	shi	d4
 	add.w	d4,d4
-	moveq	#$81,d0			* 20.8KHz:M1,5.2KHz:M0/M2
+	moveq	#$81,d0			* 20.8kHz:M1,5.2kHz:M0/M2
 	jsr	FRQSE0
 	moveq	#REPT,d2
 	moveq	#0,d0
@@ -7582,7 +7584,7 @@ AUTM13:	move.l	d0,d1
 	cmp.l	d3,d0
 	shi	d4
 	add.w	d4,d4
-	moveq	#$83,d0			* 20.8KHz:M2,7.8KHz:M0/M1
+	moveq	#$83,d0			* 20.8kHz:M2,7.8kHz:M0/M1
 	jsr	FRQSE0
 	moveq	#REPT,d2
 	moveq	#0,d0
@@ -7847,9 +7849,9 @@ SIZCA1:	btst	#0,d5
 	move.w	PCMBNX-WK(a6),d1
 	mulu	#(12*4+16*4+24*4+24*4),d1
 *		   ↑   ↑   ↑   ↑DPCM用ﾊﾞｯﾌｧ
-*		   │   │   └PCMﾊﾞｯﾌｧ3(31.2KHz用)
-*		   │   └PCMﾊﾞｯﾌｧ2(20.8KHz用)
-*		  PCMﾊﾞｯﾌｧ1(15.6KHz用)
+*		   │   │   └PCMﾊﾞｯﾌｧ3(31.2kHz用)
+*		   │   └PCMﾊﾞｯﾌｧ2(20.8kHz用)
+*		  PCMﾊﾞｯﾌｧ1(15.6kHz用)
 	add.l	d1,d0
 SIZCA2:	btst	#1,d5
 	beq	SIZCA3
@@ -8391,7 +8393,7 @@ DLTTB3:	.dc.w	 2,-1
 	.dc.w	16, 8
 
 TTLME1:	.dc.b	13,10
-TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.55 '			*;version
+TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.56 '			*;version
 	.dc.b	'(c)1993-95 philly',13,10,0
 USEMES:	.dc.b	'使用法：PCM8A [<ｽｲｯﾁ>]',13,10
 	.dc.b	9,'ON',9,': 多重再生ﾓｰﾄﾞ(通常)',13,10
@@ -8410,7 +8412,7 @@ USEMES:	.dc.b	'使用法：PCM8A [<ｽｲｯﾁ>]',13,10
 *	.dc.b	9,9,'      A:自動判定 , 省略:環境変数(OPM_CT1)参照',13,10
 *	.dc.b	9,9,9,'(n に 1,2 を指定する場合,本体の改造が必要)',13,10
 *	.dc.b	9,'-F[n]',9,': 基準周波数 (通常:0)',13,10
-*	.dc.b	9,9,'  n = 0:15.6K , 1:20.8K , 2:31.2K (Hz)',13,10
+*	.dc.b	9,9,'  n = 0:15.6k , 1:20.8k , 2:31.2k (Hz)',13,10
 *	.dc.b	9,9,'      省略:最高周波数(-M の指定による)',13,10
 	.dc.b	9,'-S[n1],[n2],[n3],[n4] : ｼｽﾃﾑ状態の設定',13,10
 	.dc.b	9,9,'  n1= ﾁｬﾝﾈﾙ数  (1～16,通常:8)',13,10
