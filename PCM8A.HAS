@@ -1,9 +1,9 @@
 *
-*	X68k polyphonic ADPCM driver PCM8A.X v0.57				*;version
+*	X68k polyphonic ADPCM driver PCM8A.X v0.58				*;version
 *		Xellent30ｼﾘｰｽﾞ ﾛｰｶﾙSRAM用ﾜｰｸ分離対応
 *		040turbo 対応 , ﾊｲﾒﾓﾘ常駐対応
 *		ADPCM clock up 暫定対応
-*					philly	1995/12/19
+*					philly	1996/2/1
 *
 *	改造は自由ですが、利用者の混乱を防ぐために、
 *	改造内容をドキュメント等に明記しておいてください。
@@ -64,10 +64,10 @@ PPIPC	equ	$FFE9A005
 PPICTL	equ	$FFE9A007
 
 *************************************************
-*  ADPCM → DPCM 変換ﾏｸﾛ			*	DPCM:ここではPCMﾃﾞｰﾀの差分情報の意味
+*  ADPCM → DPCM 変換ﾏｸﾛ			* DPCM:ここではPCMﾃﾞｰﾀの差分情報の意味
 *						*
 * IN	D0.l	ﾃｰﾌﾞﾙｱﾄﾞﾚｽ情報			*
-*	D1.l	ﾃﾞｰﾀ位置ｵﾌｾｯﾄ(音量変換に使用)	*	音量1段階で1Kﾊﾞｲﾄのﾃｰﾌﾞﾙを使用
+*	D1.l	ﾃﾞｰﾀ位置ｵﾌｾｯﾄ(音量変換に使用)	* 音量1段階で1Kﾊﾞｲﾄのﾃｰﾌﾞﾙを使用
 *	(A0)	ADPCMﾃﾞｰﾀ			*
 *	D6.l	0 (定数)			*
 * OUT	D0.l	次のﾃｰﾌﾞﾙｱﾄﾞﾚｽ情報		*
@@ -84,9 +84,9 @@ A2P00	.macro
 	move.b	(a0)+,d0		*	 8	 2
 	add.w	d0,d0			*	 4	 2
 	add.w	d0,d0			*	 4	 2
-	movea.l	d0,a2			*	 4	 2    (わかる人にはわかると思うが…)
-	move.l	(a2,d1.l),d0		*	18	 4  ←	ここで既に誤差が出ている
-	add.l	d0,(a1)+		*	20	 2  ←	ここでも誤差が出る
+	movea.l	d0,a2			*	 4	 2
+	move.l	(a2,d1.l),d0		*	18	 4  大/小音量時に変換に誤差が出る
+	add.l	d0,(a1)+		*	20	 2  演算誤差が出る(音量には無関係)
 	move.l	(a2),d0			*	12	 2
 	.endm				* 合計	70ｸﾛｯｸ	16ﾊﾞｲﾄ
 
@@ -1933,7 +1933,7 @@ IOCS673:
 	bra	IOCS3X
 
 IOCS674:
-	moveq	#57,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.57)		*;version
+	moveq	#58,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.58)		*;version
 	bra	IOCS3X
 
 IOCS675:				* 単音再生ﾓｰﾄﾞ/録音時動作制御
@@ -2086,7 +2086,7 @@ CHNSRE:	movem.l	(sp)+,d1-d5/a0-a1
 
 	.dc.w	0,0,0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
 
-	.dc.b	'PCM8A057'		* PCM8A 認識用				*;version
+	.dc.b	'PCM8A058'		* PCM8A 認識用				*;version
 CHKFLG:	.dc.b	'@PCM/048'		* PCM8 認識用
 
 *--------------------------------------------------------------------
@@ -3191,14 +3191,13 @@ TBLADR3:
 TBLCNG:	movem.l	d0-d3/a0,-(sp)		* $007x:動作ﾓｰﾄﾞ変更
 	andi.l	#$00FFFFFF,d1
 	tst.b	d1			* 定位
-	beq	TBLC02
+	beq	TBLC01
 	cmpi.b	#4,d1
-	bcs	TBLC01
-	move.b	3(a5),d1
-TBLC01:	bsr	PANSET
+	bcc	TBLC02
+	bsr	PANSET
 	bra	TBLC03
-TBLC02:	bset	#31,d1
-	move.b	3(a5),d1
+TBLC01:	bset	#31,d1
+TBLC02:	move.b	3(a5),d1
 TBLC03:	ror.w	#8,d1
 	cmpi.b	#13,d1			* 周波数
 	bcs	TBLC11
@@ -3465,7 +3464,8 @@ TBLS53:	move.l	a1,d0			* ﾘﾝｸｱﾚｲﾁｪｰﾝ出力
 	bra	TBLSEE
 
 PANSET:	movem.l	d0-d1,-(sp)		* 定位設定
-	andi.b	#3,d1
+	cmpi.b	#4,d1
+	bcc	PANSE3
 	cmp.b	PANWK-WK(a6),d1
 	beq	PANSE3
 	move.w	sr,-(sp)
@@ -3539,7 +3539,7 @@ FRQSE6:	move.w	(sp)+,sr
 FRQSEE:	movem.l	(sp)+,d0-d2/a0
 	rts
 
-	.dc.w	0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
+	.dc.w	0,0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
 
 *	処理ﾊﾞｲﾄ数ﾃｰﾌﾞﾙ				  ﾊﾞｲﾄ位置
 BYTTB1:	.dc.l	28*$10000+PCMBI1/4	,0	* 0	: 未使用
@@ -8334,17 +8334,17 @@ TBLG33:	cmp.w	d4,d2			* 範囲制限(VOLMIN～VOLLIM)
 	blt	TBLG34
 	cmp.w	d6,d2
 	bgt	TBLG35
-	move.w	-2(a4,d0.l),(a4)	* ﾃﾞｰﾀ設定
+	move.w	-2(a4,d0.l),(a4)	* ﾃﾞｰﾀ設定(変化先の値を複写する)
 	lea	$400(a4),a4
 	addq.w	#1,d2
 	dbra	d1,TBLG33
 	bra	TBLG36
-TBLG34:	move.w	(a0,d5.l),(a4)
+TBLG34:	move.w	(a0,d5.l),(a4)		* 下方向のｸﾘｯﾌﾟ(最下位のﾃｰﾌﾞﾙを参照)
 	lea	$400(a4),a4
 	addq.w	#1,d2
 	dbra	d1,TBLG33
 	bra	TBLG36
-TBLG35:	move.w	(a2,d5.l),(a4)
+TBLG35:	move.w	(a2,d5.l),(a4)		* 上方向のｸﾘｯﾌﾟ(最上位のﾃｰﾌﾞﾙを参照)
 	lea	$400(a4),a4
 	addq.w	#1,d2
 	dbra	d1,TBLG33
@@ -8358,6 +8358,7 @@ TBLG36:	addq.l	#4,a3
 	.data
 
 *		↓これらの値は 32768/1.1^(80-n) の解の小数点未満を切り捨てたもの
+*		  (ちなみに PCM8.X のテーブルは7捨8入した値になっている)
 DLTTB1:	.dc.w	   0,   0,   0,   0,   0,   0,   0,   0		* -64...-57
 	.dc.w	   0,   0,   0,   0,   0,   0,   0,   0		* -56...-49
 	.dc.w	   0,   0,   0,   0,   0,   0,   0,   0		* -48...-41
@@ -8391,8 +8392,8 @@ DLTTB3:	.dc.w	 2,-1
 	.dc.w	16, 8
 
 TTLME1:	.dc.b	13,10
-TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.57 '			*;version
-	.dc.b	'(c)1993-95 philly',13,10,0
+TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.58 '			*;version
+	.dc.b	'(c)1993-96 philly',13,10,0
 USEMES:	.dc.b	'使用法：PCM8A [<ｽｲｯﾁ>]',13,10
 	.dc.b	9,'ON',9,': 多重再生ﾓｰﾄﾞ(通常)',13,10
 	.dc.b	9,'OFF',9,': 単音再生ﾓｰﾄﾞ',13,10

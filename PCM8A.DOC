@@ -2,7 +2,7 @@
 ┃									┃
 ┃	リアルタイム　ＡＤＰＣＭ多重再生ドライバー　『ＰＣＭ８Ａ』	┃
 ┃									┃
-┃		version 0.57			philly 1993-1995	┃
+┃		version 0.58			philly 1993-1996	┃
 ┃									┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
@@ -317,7 +317,7 @@ PCM (または @PCM) となります。
 　　X68k MDX AUDIO DRIVER version 2.00a HSX/2.06+15/16 (c)1991,92 Konoa.
 
 　　Z-MUSIC UNIVERSAL VERSION 1.52 (C) 1991,1992,1993 ZENJI SOFT
-　　Z-MUSIC UNIVERSAL VERSION 2.05 (C) 1991,1992,1993,1994 ZENJI SOFT
+　　Z-MUSIC UNIVERSAL VERSION 2.06 (C) 1991,1992,1993,1994 ZENJI SOFT
 
 　　X68k music creative driver version 0.60 (c)1993-95 CUL.
 
