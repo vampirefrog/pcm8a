@@ -1,8 +1,8 @@
 *
-*	X68k polyphonic ADPCM driver PCM8A.X v0.54				*;version
+*	X68k polyphonic ADPCM driver PCM8A.X v0.55				*;version
 *		Xellent30ｼﾘｰｽﾞ ﾛｰｶﾙSRAM用ﾜｰｸ分離対応
 *		ADPCM clock up & 040turbo 暫定対応
-*					philly	1995/11/12
+*					philly	1995/11/19
 *
 *	改造は自由ですが、利用者の混乱を防ぐために、
 *	改造内容をドキュメント等に明記しておいてください。
@@ -31,8 +31,10 @@ PCM8NG	equ	'@PCM'
 PCMSPC	equ	$08			* 無音部
 PCMSP1	equ	$88			* 停止時
 PCMSP2	equ	$88			* 強制停止時
-PCMSPN	equ	2
-PCMBGN	equ	4
+PCMSP3	equ	$00			* 無音部2
+PCMSPN	equ	2			* PCMSP2ﾊﾞｲﾄ数
+PCMSPR	equ	6			* PCMSP3ﾊﾞｲﾄ数
+PCMBGN	equ	8			* 開始時ﾊﾞｲﾄ数
 TRYNUM	equ	4			* 過負荷時ﾘﾄﾗｲ回数
 DCOL0	equ	$0000			* 動作表示色ｺｰﾄﾞ(割り込み終了)
 DCOL1	equ	$0020			*	〃	(DPCM→ADPCM変換中)
@@ -1936,7 +1938,7 @@ IOCS673:
 	bra	IOCS3X
 
 IOCS674:
-	moveq	#54,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.54)		*;version
+	moveq	#55,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.55)		*;version
 	bra	IOCS3X
 
 IOCS675:				* 単音再生ﾓｰﾄﾞ/録音時動作制御
@@ -2089,7 +2091,7 @@ CHNSRE:	movem.l	(sp)+,d1-d5/a0-a1
 
 	.dc.w	0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
 
-	.dc.b	'PCM8A054'		* PCM8A 認識用				*;version
+	.dc.b	'PCM8A055'		* PCM8A 認識用				*;version
 CHKFLG:	.dc.b	'@PCM/048'		* PCM8 認識用
 
 *--------------------------------------------------------------------
@@ -2791,14 +2793,14 @@ T2EX5:	tst.b	KEEPFL-WK(a6)		* $01FF:占有解除
 T2ACTV:	move.w	sr,-(sp)		* DMAC/ADPCMを動作状態にする
 	ori.w	#$0700,sr
 	movem.l	d0-d1/a0/a5-a6,-(sp)
+	moveq	#0,d1
+	bsr	PANSET
+	bsr	PANCNG
 	bsr	DMASTP
 	bsr	T2WCLR
 	moveq	#4,d0
 	add.b	FRQSEL-WK(a6),d0
 	bsr	FRQSET
-	moveq	#3,d1
-	bsr	PANSET
-	bsr	PANCNG
 	movea.l	ADPBFX-WK(a6),a0
 	moveq	#PCMBGN,d1
 	bsr	DMASTA
@@ -2809,15 +2811,15 @@ T2ACT1:	movem.l	(sp)+,d0-d1/a0/a5-a6
 T2ACT0:	move.w	sr,-(sp)
 	ori.w	#$0700,sr
 	movem.l	d0-d1/a0/a5-a6,-(sp)
+	moveq	#0,d1
+	bsr	PANSET
+	bsr	PANCNG
 	lea	DMACH3,a5
 	bsr	DMASP1
 	bsr	T2WCLR
 	moveq	#4,d0
 	add.b	FRQSEL-WK(a6),d0
 	bsr	FRQSET
-	moveq	#3,d1
-	bsr	PANSET
-	bsr	PANCNG
 	movea.l	ADPBFX-WK(a6),a0
 	moveq	#PCMBGN,d1
 	bsr	DMASA1
@@ -2828,9 +2830,9 @@ T2KILL:	move.w	sr,-(sp)		* 全ﾁｬﾝﾈﾙ強制停止&初期化
 	movem.l	d0-d7/a0-a1/a5,-(sp)
 	moveq	#0,d1
 	move.w	d1,ADIOCS.w
+	bsr	DMASTP
 	bsr	PANSET
 	bsr	PANCNG
-	bsr	DMASTP
 T2KIL1:	bsr	T2WCLR
 	bsr	DSPCLR
 	movem.l	(sp)+,d0-d7/a0-a1/a5
@@ -3629,9 +3631,9 @@ M1LEN:	.dc.l	0		* 単音再生ﾓｰﾄﾞﾃﾞｰﾀ長さ
 M1ADR:	.dc.l	0		*	〃　　ｱﾄﾞﾚｽ
 INTWK2:	.dc.w	$FDFF		* 割り込みﾏｽｸ中の割り込みﾚﾍﾞﾙ
 PANFLG:	.dc.w	0		* 定位変更ﾌﾗｸﾞ
-PANWK1:	.dc.w	$0200		* 定位変更ﾜｰｸ1
-PANWK2:	.dc.w	$0200		*	〃   2
-PANWK3:	.dc.w	$0200		*	〃   3
+PANWK1:	.dc.w	$0301		* 定位変更ﾜｰｸ1
+PANWK2:	.dc.w	$0301		*	〃   2
+PANWK3:	.dc.w	$0301		*	〃   3
 
 FRQMOD:	.dc.b	0		* 周波数切り替えﾓｰﾄﾞ(0:4M/8M,1:16M/8M,2:4M/8M/16M)
 FRQSEL:	.dc.b	0		* 基準周波数(0:15.6K,1:20.3K,2:31.2K)
@@ -3677,7 +3679,7 @@ SYSFLG:	.dc.b	0		* ｼｽﾃﾑ状態ﾌﾗｸﾞ
 				*	2	音量固定ﾓｰﾄﾞ(trap #2 設定)
 				*	1	音量固定ﾓｰﾄﾞ(ｺﾏﾝﾄﾞﾗｲﾝ設定)
 				*	0	ﾃﾞﾊﾞｲｽﾄﾞﾗｲﾊﾞﾓｰﾄﾞ
-PANWK:	.dc.b	0		* 定位(0～3)
+PANWK:	.dc.b	$FF		* 定位(0～3)
 TRYWK:	.dc.b	0		* 過負荷ﾘﾄﾗｲｶｳﾝﾀ
 M1MOD:	.dc.b	0		* 単音再生ﾓｰﾄﾞﾌﾗｸﾞ(0:ﾁｪｰﾝ無し,1:ｱﾚｲﾁｪｰﾝ,2:ﾘﾝｸｱﾚｲﾁｪｰﾝ)
 IOFLG:	.dc.b	0		* IOCS一時停止ﾌﾗｸﾞ
@@ -8011,9 +8013,13 @@ INIT2:	pea	0.w
 	move.l	a3,ADPBFX-WK(a6)
 	moveq	#PCMSP2,d1
 	moveq	#PCMSPN,d0
+	sub.w	d0,d2
+	bsr	WKINIT
+	moveq	#PCMSP3,d1
+	moveq	#PCMSPR,d0
+	sub.w	d0,d2
 	bsr	WKINIT
 	moveq	#PCMSPC,d1
-	sub.w	d0,d2
 	move.w	d2,d0
 	bsr	WKINIT
 
@@ -8049,12 +8055,11 @@ INIT2:	pea	0.w
 INITE:	addq.l	#4,sp
 	rts
 
-WKINIT:	move.l	d0,-(sp)
-	dbra	d0,WKINI1
+WKINIT:	move.w	d0,-(sp)
 	bra	WKINI2
 WKINI1:	move.b	d1,(a3)+
-	dbra	d0,WKINI1
-WKINI2:	move.l	(sp)+,d0
+WKINI2:	dbra	d0,WKINI1
+	move.w	(sp)+,d0
 	rts
 
 INISUB:	movem.l	d0-d4/a0-a1,-(sp)
@@ -8386,7 +8391,7 @@ DLTTB3:	.dc.w	 2,-1
 	.dc.w	16, 8
 
 TTLME1:	.dc.b	13,10
-TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.54 '			*;version
+TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.55 '			*;version
 	.dc.b	'(c)1993-95 philly',13,10,0
 USEMES:	.dc.b	'使用法：PCM8A [<ｽｲｯﾁ>]',13,10
 	.dc.b	9,'ON',9,': 多重再生ﾓｰﾄﾞ(通常)',13,10
