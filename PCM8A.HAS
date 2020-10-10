@@ -1,9 +1,9 @@
 *
-*	X68k polyphonic ADPCM driver PCM8A.X v0.59				*;version
+*	X68k polyphonic ADPCM driver PCM8A.X v0.60				*;version
 *		Xellent30ｼﾘｰｽﾞ ﾛｰｶﾙSRAM用ﾜｰｸ分離対応
 *		040turbo 対応 , ﾊｲﾒﾓﾘ常駐対応
-*		ADPCM clock-up 対応(まだ暫定)
-*					philly	1996/4/18
+*		ADPCM clock-up 対応
+*					philly	1996/11/6
 *
 *	改造は自由ですが、利用者の混乱を防ぐために、
 *	改造内容をドキュメント等に明記しておいてください。
@@ -1933,7 +1933,7 @@ IOCS673:
 	bra	IOCS3X
 
 IOCS674:
-	moveq	#59,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.59)		*;version
+	moveq	#60,d0			* ﾊﾞｰｼﾞｮﾝ情報(PCM8A v0.60)		*;version
 	bra	IOCS3X
 
 IOCS675:				* 単音再生ﾓｰﾄﾞ/録音時動作制御
@@ -2086,7 +2086,7 @@ CHNSRE:	movem.l	(sp)+,d1-d5/a0-a1
 
 	.dc.w	0,0,0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
 
-	.dc.b	'PCM8A059'		* PCM8A 認識用				*;version
+	.dc.b	'PCM8A060'		* PCM8A 認識用				*;version
 CHKFLG:	.dc.b	'@PCM/048'		* PCM8 認識用
 
 *--------------------------------------------------------------------
@@ -2193,6 +2193,7 @@ T2ENT33:				* 即座に終了
 	bsr	DSPCLR
 	sf	SKPFLG-WK(a6)
 	sf	ADIOCS.w
+	move.b	#PCMSP2,PCMDAT
 	moveq	#0,d0
 	rts
 
@@ -2861,9 +2862,9 @@ DMASA1:	move.b	#$10,7(a5)
 DMASTP:	lea	DMACH3,a5		* DMA停止
 	lea	WK(pc),a6
 DMASP0:	move.b	#$01,PCMCNT		* ADPCM停止
-DMASP1:	move.b	#$10,7(a5)		* DMAC強制停止
+DMASP1:	move.b	#PCMSP2,PCMDAT
+	move.b	#$10,7(a5)		* DMAC強制停止
 	st.b	(a5)
-	move.b	#PCMSP2,PCMDAT
 	sf	ACTFLG-WK(a6)
 	tas	(a6)
 	rts
@@ -3206,28 +3207,23 @@ TBLC11:	swap	d1
 	moveq	#0,d3
 	movem.w	VOLMN0-WK(a6),d0/d2
 	move.b	d1,d3			* 音量
-	cmpi.b	#15,d3
-	bhi	TBLC12
+	cmpi.b	#$FF,d3
+	bne	TBLC12
+	move.b	1(a5),d1
+	move.b	d1,d3
+TBLC12:	cmpi.b	#15,d3
+	bhi	TBLC13
 	move.b	PCMXT4-WK(a6,d3.w),d3
-TBLC12:	cmp.b	d0,d3
+TBLC13:	cmp.b	d0,d3
 	bcs	TBLC21
 	cmp.b	d2,d3
-	bls	TBLC24
-TBLC21:	move.b	1(a5),d1
-	move.b	d1,d3
-	cmpi.b	#15,d3
-	bhi	TBLC22
-	move.b	PCMXT4-WK(a6,d3.w),d3
-TBLC22:	cmp.b	d0,d3
-	bcc	TBLC23
-	move.b	d0,d3
-	move.b	d0,d1
-	bra	TBLC24
-TBLC23:	cmp.b	d2,d3
-	bls	TBLC24
+	bls	TBLC22
 	move.b	d2,d3
 	move.b	d2,d1
-TBLC24:	swap	d1
+	bra	TBLC22
+TBLC21:	move.b	d0,d3
+	move.b	d0,d1
+TBLC22:	swap	d1
 	moveq	#0,d2
 	move.b	d1,d2
 	move.b	MODTBL-WK(a6,d2.w),d0
@@ -3320,28 +3316,23 @@ TBLS11:	swap	d1
 	moveq	#0,d5
 	movem.w	VOLMN0-WK(a6),d3-d4
 	move.b	d1,d5			* 音量
-	cmpi.b	#15,d5
-	bhi	TBLS12
+	cmpi.b	#$FF,d5
+	bne	TBLS12
+	move.b	1(a5),d1
+	move.b	d1,d5
+TBLS12:	cmpi.b	#15,d5
+	bhi	TBLS13
 	move.b	PCMXT4-WK(a6,d5.w),d5
-TBLS12:	cmp.b	d3,d5
+TBLS13:	cmp.b	d3,d5
 	bcs	TBLS21
 	cmp.b	d4,d5
-	bls	TBLS24
-TBLS21:	move.b	1(a5),d1
-	move.b	d1,d5
-	cmpi.b	#15,d5
-	bhi	TBLS22
-	move.b	PCMXT4-WK(a6,d5.w),d5
-TBLS22:	cmp.b	d3,d5
-	bcc	TBLS23
-	move.b	d3,d1
-	move.b	d3,d5
-	bra	TBLS24
-TBLS23:	cmp.b	d4,d5
-	bls	TBLS24
+	bls	TBLS22
 	move.b	d4,d1
 	move.b	d4,d5
-TBLS24:	ori.w	#$4000,d1		* 初期化ﾌﾗｸﾞｾｯﾄ
+	bra	TBLS22
+TBLS21:	move.b	d3,d1
+	move.b	d3,d5
+TBLS22:	ori.w	#$4000,d1		* 初期化ﾌﾗｸﾞｾｯﾄ
 	swap	d1
 	moveq	#0,d0
 	move.b	d1,d0
@@ -3466,7 +3457,14 @@ TBLS53:	move.l	a1,d0			* ﾘﾝｸｱﾚｲﾁｪｰﾝ出力
 PANSET:	movem.l	d0-d1,-(sp)		* 定位設定
 	cmpi.b	#4,d1
 	bcc	PANSE3
-	cmp.b	PANWK-WK(a6),d1
+	move.b	PANWK-WK(a6),d0
+	tst.w	PANFLG-WK(a6)
+	bne	PANSE1
+	moveq	#3,d0
+	and.b	PPIPC,d0
+	move.b	PANTBL(pc,d0.w),d0
+	move.b	d0,PANWK-WK(a6)
+PANSE1:	cmp.b	d0,d1
 	beq	PANSE3
 	move.w	sr,-(sp)
 	ori.w	#$0700,sr
@@ -3484,6 +3482,8 @@ PANSET:	movem.l	d0-d1,-(sp)		* 定位設定
 	move.w	(sp)+,sr
 PANSE3:	movem.l	(sp)+,d0-d1
 	rts
+
+PANTBL:	.dc.b	3,1,2,0
 
 PANCNG:	move.w	sr,-(sp)		* 定位変更
 	ori.w	#$0700,sr
@@ -3727,26 +3727,21 @@ WKADR5:	.dc.l	-2,-2		*         〃         先頭ｱﾄﾞﾚｽ
 
 INTOP2:	move.b	#$01,PCMCNT
 	sf	ADIOCS.w
-	movea.l	(sp)+,a5
 	rte
 
 INTOP1:	btst	#2,ADIOCS.w
 	bne	INTOP2
 	move.b	#PCMSP1,PCMDAT		* 終了
-	movea.l	(sp)+,a5
 	rte
 
-INTOPR:	move.l	a5,-(sp)		* 多重割り込み対策
-	lea	DMACH3,a5
-	move.b	(a5),(a5)
+INTOPR:	move.b	DMACH3,DMACH3		* 多重割り込み対策
 	bmi	INTOP1
-	movea.l	(sp)+,a5
 	rte
 
 DISPON:	move.w	#DCOL1,TXTPL0		* 動作状態表示ON
 	bra	INTEXA
 
-	.dc.w	0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
+*	.dc.w	0			* 4ﾊﾞｲﾄ境界調整用			*;dummy
 
 *	割り込み処理ｴﾝﾄﾘ	(ｴﾗｰ時と共通)
 
@@ -8420,7 +8415,7 @@ DLTTB3:	.dc.w	 2,-1
 	.dc.w	16, 8
 
 TTLME1:	.dc.b	13,10
-TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.59 '			*;version
+TTLMES:	.dc.b	'X68k PCM8A polyphonic ADPCM driver v0.60 '			*;version
 	.dc.b	'(c)1993-96 philly',13,10,0
 USEMES:	.dc.b	'使用法：PCM8A [<ｽｲｯﾁ>]',13,10
 	.dc.b	9,'ON',9,': 多重再生ﾓｰﾄﾞ(通常)',13,10
@@ -8434,20 +8429,21 @@ USEMES:	.dc.b	'使用法：PCM8A [<ｽｲｯﾁ>]',13,10
 	.dc.b	9,9,'  n = 0:OFF , 1:ON , 省略:ON/OFFの反転',13,10
 	.dc.b	9,'-In',9,': IOCSで使用するﾁｬﾝﾈﾙ数 (通常:8)',13,10
 	.dc.b	9,9,'  n = 0～8 (0:IOCS出力を禁止)',13,10
-*	.dc.b	9,'-M[n]',9,': ADPCMｸﾛｯｸﾓｰﾄﾞ (通常:0)',13,10
-*	.dc.b	9,9,'  n = 0:4M/8M , 1:16M/8M , 2:4M/8M/16M (Hz)',13,10
-*	.dc.b	9,9,'      A:自動判定 , 省略:環境変数(OPM_CT1)参照',13,10
-*	.dc.b	9,9,9,'(n に 1,2 を指定する場合,本体の改造が必要)',13,10
-*	.dc.b	9,'-F[n]',9,': 基準周波数 (通常:0)',13,10
-*	.dc.b	9,9,'  n = 0:15.6k , 1:20.8k , 2:31.2k (Hz)',13,10
-*	.dc.b	9,9,'      省略:最高周波数(-M の指定による)',13,10
 	.dc.b	9,'-S[n1],[n2],[n3],[n4] : ｼｽﾃﾑ状態の設定',13,10
 	.dc.b	9,9,'  n1= ﾁｬﾝﾈﾙ数  (1～16,通常:8)',13,10
 	.dc.b	9,9,'  n2= 処理ﾊﾞｲﾄ数/12 (1～12,通常:4)',13,10
-	.dc.b	9,9,'  n3= 最小音量 (0～ 8,$40～$80,通常:$40)',13,10
-	.dc.b	9,9,'  n4= 最大音量 (8～15,$80～$A0,通常:$A0)',13,10
+	.dc.b	9,9,'  n3= 最小音量 (0～15,$40～$A0,通常:$40)',13,10
+	.dc.b	9,9,'  n4= 最大音量 (0～15,$40～$A0,通常:$A0)',13,10
 	.dc.b	9,'-Wn',9,': ﾊﾞｯﾌｧ/ﾃｰﾌﾞﾙの分離 (常駐時のみ有効)',13,10
 	.dc.b	9,9,'  n = 1～31 (ﾋﾞｯﾄ0～4で分離する領域を指定)',13,10
+	.dc.b	9,'-M[n]',9,': ADPCMｸﾛｯｸﾓｰﾄﾞ (通常:0)',13,10
+	.dc.b	9,9,'  n = 0:4M/8M , 1:16M/8M , 2～4:4M/8M/16M (Hz)',13,10
+	.dc.b	9,9,'      A:自動判定 , 省略:環境変数(OPM_CT1)参照',13,10
+	.dc.b	9,9,9,'(1～4はADPCMをｸﾛｯｸｱｯﾌﾟ改造してある場合に有効)',13,10
+	.dc.b	9,'-F[n]',9,': 基準周波数 (通常:0)',13,10
+	.dc.b	9,9,'  n = 0:15.6k , 1:20.8k , 2:31.2k (Hz)',13,10
+	.dc.b	9,9,'      省略:最高周波数(-Mｽｲｯﾁの指定に依存する)',13,10
+	.dc.b	9,9,9,'(1,2はADPCMをｸﾛｯｸｱｯﾌﾟ改造してある場合に有効)',13,10
 	.dc.b	9,'〈常駐状態での設定変更が可能です〉',13,10
 	.dc.b	0
 
